@@ -28,7 +28,7 @@ def run_flask():
 #  ⚠️  غيّر هذه القيم قبل التشغيل
 # ─────────────────────────────────────────────
 TOKEN = os.environ.get("BOT_TOKEN")
-RESULTS_DESTINATION = 1449739390
+RESULTS_DESTINATION = int(os.environ.get("RESULTS_DESTINATION", "1449739390"))
 AU_LINK    = "https://t.me/arab_union3"
 DATA_FILE  = "war_data.json"
 SUPER_ADMINS = ["mwsa_20", "levil_8"]
@@ -88,7 +88,6 @@ async def send_war_link(context, chat_id: int, reason: str):
         print(f"✅ تم إرسال الرابط إلى {RESULTS_DESTINATION}")
     except Exception as e:
         print(f"❌ فشل إرسال الرابط: {e}")
-        print("💡 تأكد أن RESULTS_DESTINATION صحيح وأن المستخدم بعت /start للبوت")
 
 # ─────────────────────────────────────────────
 #  مهام الخلفية
@@ -168,12 +167,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    cid         = update.effective_chat.id
-    msg         = update.message.text
-    msg_up      = msg.upper().strip()
-    msg_cl      = clean(msg)
-    user        = update.effective_user
-    u_tag       = f"@{user.username}" if user.username else f"ID:{user.id}"
+    cid    = update.effective_chat.id
+    msg    = update.message.text
+    msg_up = msg.upper().strip()
+    msg_cl = clean(msg)
+    user   = update.effective_user
+    u_tag  = f"@{user.username}" if user.username else f"ID:{user.id}"
 
     # صلاحيات
     try:
@@ -187,30 +186,37 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     w = wars.get(cid)
 
     # ══════════════════════════════════════════
-    # 1. بدء المواجهة:  CLAN X VS CLAN Y
+    # 1. بدء المواجهة:  SP VS C4
+    #    شرط: حرفين أو ثلاثة (إنجليزي + أرقام) قبل وبعد VS
+    #    مسموح لمالك الجروب فقط
     # ══════════════════════════════════════════
-    if "CLAN" in msg_up and "VS" in msg_up and "+1" not in msg_up and "+ 1" not in msg_up:
-        parts = msg_up.split(" VS ")
-        if len(parts) == 2:
-            c1 = parts[0].replace("CLAN","").strip()
-            c2 = parts[1].replace("CLAN","").strip()
-            wars[cid] = {
-                "c1": {"n": c1, "s": 0, "p": [], "stats": [], "leader": None},
-                "c2": {"n": c2, "s": 0, "p": [], "stats": [], "leader": None},
-                "active": True, "mid": None, "matches": [],
-                "source_link": f"https://t.me/c/{str(cid).replace('-100','')}/1",
-                "link_sent": False,
-                "waiting_objection": False
-            }
-            save()
-            await update.message.reply_text(
-                f"⚔️ بدأت الحرب!\n🔥 {c1}  VS  {c2}"
-            )
-            # ✅ تغيير اسم الجروب فقط إذا كان المُرسل هو Owner
-            if is_creator:
-                try:
-                    await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
-                except: pass
+    war_match = re.match(
+        r'^([A-Za-z0-9]{2,3})\s+VS\s+([A-Za-z0-9]{2,3})$',
+        msg.strip(),
+        re.IGNORECASE
+    )
+    if war_match and "+1" not in msg_up:
+        if not is_creator:
+            await update.message.reply_text("🚫 هذا الأمر لمالك الجروب (Owner) فقط.")
+            return
+        c1 = war_match.group(1).upper()
+        c2 = war_match.group(2).upper()
+        wars[cid] = {
+            "c1": {"n": c1, "s": 0, "p": [], "stats": [], "leader": None},
+            "c2": {"n": c2, "s": 0, "p": [], "stats": [], "leader": None},
+            "active": True, "mid": None, "matches": [],
+            "source_link": f"https://t.me/c/{str(cid).replace('-100','')}/1",
+            "link_sent": False,
+            "waiting_objection": False
+        }
+        save()
+        await update.message.reply_text(
+            f"⚔️ بدأت الحرب!\n🔥 {c1}  VS  {c2}"
+        )
+        if is_creator:
+            try:
+                await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
+            except: pass
         return
 
     if not w:
@@ -308,7 +314,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # 5. إضافة نقطة:  CLAN + 1 @p1 @p2 3 1
+    # 5. إضافة نقطة:  SP +1 @p1 @p2 3 1
     # ══════════════════════════════════════════
     if ("+1" in msg_up or "+ 1" in msg_up) and w.get("active"):
         win_k = (
@@ -323,10 +329,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scores  = re.findall(r'\b(\d+)\b', msg)
 
         if len(players) >= 2 and len(scores) >= 2:
-            asst = (
-                context.bot_data
-                .get(f"asst_{cid}_{w[win_k]['n'].upper()}")
-            )
+            asst = context.bot_data.get(f"asst_{cid}_{w[win_k]['n'].upper()}")
             if not (is_ref or u_tag == w[win_k]["leader"] or u_tag == asst):
                 await update.message.reply_text("❌ التسجيل للحكام والقادة/المساعدين فقط.")
                 return
@@ -352,7 +355,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await _update_table(context, cid, w)
 
-            # ✅ تغيير اسم الجروب فقط إذا كان المُرسل هو Owner
+            # تغيير اسم الجروب فقط إذا كان المُرسل هو Owner
             if is_creator:
                 try:
                     await context.bot.set_chat_title(
@@ -451,12 +454,12 @@ async def _end_war(update, context, cid, w, win_k):
 
     real = [h for h in w[win_k]["stats"] if not h["is_free"]]
     if real:
-        hasm        = real[-1]["name"]
-        star_data   = max(real, key=lambda x: x["goals"] - x["rec"])
-        star        = star_data["name"]
-        star_g      = star_data["goals"]
-        star_r      = star_data["rec"]
-        result_msg  = (
+        hasm       = real[-1]["name"]
+        star_data  = max(real, key=lambda x: x["goals"] - x["rec"])
+        star       = star_data["name"]
+        star_g     = star_data["goals"]
+        star_r     = star_data["rec"]
+        result_msg = (
             f"🎊 فاز كلان {w[win_k]['n']} 🎊\n\n"
             f"🎯 الحاسم: {hasm}\n"
             f"⭐ النجم: {star} (سجّل {star_g} واستقبل {star_r})"
@@ -489,6 +492,5 @@ if __name__ == "__main__":
 
     print("✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
-    print("💡 لمعرفة chat_id الخاص بك: ابعت /start للبوت")
 
     app.run_polling(drop_pending_updates=True)
