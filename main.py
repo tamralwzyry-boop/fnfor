@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -25,13 +25,17 @@ def run_flask():
     web_app.run(host='0.0.0.0', port=7860)
 
 # ─────────────────────────────────────────────
-#  ⚠️  غيّر هذه القيم قبل التشغيل
+#  إعدادات
 # ─────────────────────────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN               = os.environ.get("BOT_TOKEN")
 RESULTS_DESTINATION = int(os.environ.get("RESULTS_DESTINATION", "1449739390"))
-AU_LINK    = "https://t.me/arab_union3"
-DATA_FILE  = "war_data.json"
-SUPER_ADMINS = ["mwsa_20", "levil_8"]
+AU_LINK             = "https://t.me/arab_union3"
+DATA_FILE           = "war_data.json"
+
+# أوقات التنبيهات بالثواني
+TIME_REMIND_1 = 2 * 24 * 3600   # تنبيه أول بعد يومين
+TIME_REMIND_2 = 3 * 24 * 3600   # تنبيه ثاني بعد 3 أيام
+TIME_AUTO_END = 6 * 3600         # إرسال رابط تلقائي بعد 6 ساعات من النهاية
 
 # ─────────────────────────────────────────────
 #  البيانات
@@ -50,6 +54,10 @@ def load():
         wars = {int(k): v for k, v in data.items()}
         print("✅ بيانات محملة")
 
+def now_ts() -> float:
+    """الوقت الحالي كـ timestamp"""
+    return datetime.now(timezone.utc).timestamp()
+
 def emoji(n):
     d = {'0':'0️⃣','1':'1️⃣','2':'2️⃣','3':'3️⃣','4':'4️⃣',
          '5':'5️⃣','6':'6️⃣','7':'7️⃣','8':'8️⃣','9':'9️⃣'}
@@ -60,6 +68,22 @@ def clean(text):
     t = text.lower()
     t = t.replace('ة','ه').replace('أ','ا').replace('إ','ا').replace('آ','ا')
     return t
+
+# ─────────────────────────────────────────────
+#  جلب mention المالك
+# ─────────────────────────────────────────────
+async def get_owner_mention(context, chat_id: int) -> str:
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        for a in admins:
+            if a.status == 'creator':
+                if a.user.username:
+                    return f"@{a.user.username}"
+                else:
+                    return f'<a href="tg://user?id={a.user.id}">المالك</a>'
+    except:
+        pass
+    return "مالك الجروب"
 
 # ─────────────────────────────────────────────
 #  إرسال رابط المواجهة
@@ -92,60 +116,112 @@ async def send_war_link(context, chat_id: int, reason: str):
 # ─────────────────────────────────────────────
 #  مهام الخلفية
 # ─────────────────────────────────────────────
-async def task_remind_referee(chat_id: int, context):
-    await asyncio.sleep(2 * 24 * 3600)
+async def task_remind_1(chat_id: int, context, delay: float):
+    """تنبيه أول — بعد يومين من القرعة"""
+    if delay > 0:
+        await asyncio.sleep(delay)
 
     w = wars.get(chat_id)
     if not w or not w.get("active"):
         return
 
-    mentions = " ".join(f"@{a}" for a in SUPER_ADMINS)
-    await context.bot.send_message(
-        chat_id,
-        f"⏰ مرت يومان على القرعة.\n"
-        f"📢 تنبيه للحكام: {mentions}\n"
-        f"❓ هل انتهت المواجهة؟ يرجى إنهاؤها أو تأكيد استمرارها.\n\n"
-        f"(مالك الجروب يمكنه كتابة: انهاء مواجهه)"
-    )
-
-    asyncio.create_task(task_remind_owner(chat_id, context))
-
-
-async def task_remind_owner(chat_id: int, context):
-    await asyncio.sleep(1 * 24 * 3600)
-
-    w = wars.get(chat_id)
-    if not w or not w.get("active"):
-        return
-
-    owner_mention = "مالك الجروب"
+    owner_mention = await get_owner_mention(context, chat_id)
     try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-        for a in admins:
-            if a.status == 'creator':
-                if a.user.username:
-                    owner_mention = f"@{a.user.username}"
-                else:
-                    owner_mention = f'<a href="tg://user?id={a.user.id}">المالك</a>'
-                break
-    except:
-        pass
+        await context.bot.send_message(
+            chat_id,
+            f"⏰ مرت يومان على القرعة.\n"
+            f"📢 تنبيه لمالك الجروب: {owner_mention}\n"
+            f"❓ هل انتهت المواجهة؟ يرجى إنهاؤها.\n\n"
+            f"(اكتب: انهاء مواجهه)",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"❌ خطأ في task_remind_1: {e}")
 
-    await context.bot.send_message(
-        chat_id,
-        f"⚠️ {owner_mention} مرت 3 أيام ولم تنتهِ المواجهة.\n"
-        f"اكتب انهاء مواجهه لإنهائها وإرسال الرابط.",
-        parse_mode="HTML"
-    )
+    # جدولة التنبيه الثاني بعد يوم إضافي
+    asyncio.create_task(task_remind_2(chat_id, context, 24 * 3600))
 
 
-async def task_auto_send_after_6h(chat_id: int, context):
-    await asyncio.sleep(6 * 3600)
+async def task_remind_2(chat_id: int, context, delay: float):
+    """تنبيه ثاني — بعد 3 أيام من القرعة"""
+    if delay > 0:
+        await asyncio.sleep(delay)
 
+    w = wars.get(chat_id)
+    if not w or not w.get("active"):
+        return
+
+    owner_mention = await get_owner_mention(context, chat_id)
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"⚠️ {owner_mention} مرت 3 أيام ولم تنتهِ المواجهة.\n"
+            f"اكتب: انهاء مواجهه لإنهائها وإرسال الرابط.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"❌ خطأ في task_remind_2: {e}")
+
+
+async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUTO_END):
+    """إرسال رابط تلقائي بعد 6 ساعات من نهاية المواجهة"""
+    if delay > 0:
+        await asyncio.sleep(delay)
     await send_war_link(
         context, chat_id,
         "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة."
     )
+
+
+# ─────────────────────────────────────────────
+#  استعادة المهام عند إعادة التشغيل
+# ─────────────────────────────────────────────
+async def restore_tasks(application):
+    """
+    يُشغَّل مرة واحدة عند بدء البوت.
+    يحسب الوقت المتبقي لكل مواجهة نشطة ويجدول التنبيهات من حيث توقفت.
+    """
+    now = now_ts()
+
+    for chat_id, w in wars.items():
+        # ─── مواجهة نشطة عندها قرعة ───
+        if w.get("active") and w.get("draw_ts") and w.get("mid"):
+            draw_ts  = float(w["draw_ts"])
+            elapsed  = now - draw_ts
+
+            # تنبيه 1 (بعد يومين)
+            delay_1 = max(0.0, TIME_REMIND_1 - elapsed)
+            # تنبيه 2 (بعد 3 أيام)
+            delay_2 = max(0.0, TIME_REMIND_2 - elapsed)
+
+            already_sent_1 = w.get("reminded_1", False)
+            already_sent_2 = w.get("reminded_2", False)
+
+            if not already_sent_1:
+                asyncio.create_task(task_remind_1(chat_id, application, delay_1))
+                remaining_h = int(delay_1 // 3600)
+                remaining_m = int((delay_1 % 3600) // 60)
+                print(f"🔁 [{chat_id}] تنبيه 1 سيُرسل بعد {remaining_h}س {remaining_m}د")
+            elif not already_sent_2:
+                asyncio.create_task(task_remind_2(chat_id, application, delay_2))
+                remaining_h = int(delay_2 // 3600)
+                remaining_m = int((delay_2 % 3600) // 60)
+                print(f"🔁 [{chat_id}] تنبيه 2 سيُرسل بعد {remaining_h}س {remaining_m}د")
+            else:
+                print(f"🔁 [{chat_id}] كل التنبيهات أُرسلت مسبقاً")
+
+        # ─── مواجهة منتهية لم يُرسل رابطها بعد ───
+        elif not w.get("active") and not w.get("link_sent") and w.get("end_ts"):
+            end_ts  = float(w["end_ts"])
+            elapsed = now - end_ts
+            delay   = max(0.0, TIME_AUTO_END - elapsed)
+            asyncio.create_task(task_auto_send_after_6h(chat_id, application, delay))
+            remaining_h = int(delay // 3600)
+            remaining_m = int((delay % 3600) // 60)
+            print(f"🔁 [{chat_id}] إرسال رابط بعد {remaining_h}س {remaining_m}د")
+
+    print("✅ استعادة المهام اكتملت")
+
 
 # ─────────────────────────────────────────────
 #  /start
@@ -156,7 +232,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 أهلاً {name}!\n"
         f"🆔 الـ chat_id الخاص بك: {uid}\n\n"
-        f"ضع هذا الرقم في RESULTS_DESTINATION داخل الكود لتستقبل روابط المواجهات."
+        f"ضع هذا الرقم في RESULTS_DESTINATION لتستقبل روابط المواجهات."
     )
     print(f"✅ /start من: {name} | ID: {uid}")
 
@@ -174,24 +250,23 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user   = update.effective_user
     u_tag  = f"@{user.username}" if user.username else f"ID:{user.id}"
 
-    # صلاحيات
+    # صلاحيات — المالك فقط هو الحكم
     try:
         cm         = await context.bot.get_chat_member(cid, user.id)
         is_creator = (cm.status == 'creator')
-        is_ref     = (user.username in SUPER_ADMINS) or is_creator
+        is_ref     = is_creator
     except:
         is_creator = False
-        is_ref     = (user.username in SUPER_ADMINS)
+        is_ref     = False
 
     w = wars.get(cid)
 
     # ══════════════════════════════════════════
-    # 1. بدء المواجهة:  SP VS C4
-    #    شرط: حرفين أو ثلاثة (إنجليزي + أرقام) قبل وبعد VS
+    # 1. بدء المواجهة — 2 أو 3 أو 4 حروف
     #    مسموح لمالك الجروب فقط
     # ══════════════════════════════════════════
     war_match = re.match(
-        r'^([A-Za-z0-9]{2,3})\s+VS\s+([A-Za-z0-9]{2,3})$',
+        r'^([A-Za-z0-9]{2,4})\s+VS\s+([A-Za-z0-9]{2,4})$',
         msg.strip(),
         re.IGNORECASE
     )
@@ -207,16 +282,20 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "active": True, "mid": None, "matches": [],
             "source_link": f"https://t.me/c/{str(cid).replace('-100','')}/1",
             "link_sent": False,
-            "waiting_objection": False
+            "waiting_objection": False,
+            "draw_ts": None,
+            "end_ts": None,
+            "reminded_1": False,
+            "reminded_2": False
         }
         save()
         await update.message.reply_text(
             f"⚔️ بدأت الحرب!\n🔥 {c1}  VS  {c2}"
         )
-        if is_creator:
-            try:
-                await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
-            except: pass
+        try:
+            await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
+        except:
+            pass
         return
 
     if not w:
@@ -230,19 +309,19 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🚫 هذا الأمر لمالك الجروب (Owner) فقط.")
             return
         if w.get("link_sent"):
-            await update.message.reply_text("⚠️ تم إرسال الرابط مسبقاً، لا يمكن الإرسال مرة أخرى.")
+            await update.message.reply_text("⚠️ تم إرسال الرابط مسبقاً.")
             return
         await send_war_link(context, cid, "📌 أنهى المالك المواجهة يدوياً.")
         await update.message.reply_text("✅ تم إرسال رابط المواجهة للجهة المعنية.")
         return
 
     # ══════════════════════════════════════════
-    # 3. الاعتراض — عندي اعتراض
+    # 3. الاعتراض
     # ══════════════════════════════════════════
     if "عندي اعتراض" in msg_cl or msg_cl.strip() == "اعتراض":
         is_leader = u_tag in [w["c1"].get("leader"), w["c2"].get("leader")]
         if not (is_ref or is_leader):
-            await update.message.reply_text("❌ الاعتراض متاح للحكام والقادة فقط.")
+            await update.message.reply_text("❌ الاعتراض متاح للمالك والقادة فقط.")
             return
         w["waiting_objection"] = True
         w["objection_by"]      = u_tag
@@ -253,7 +332,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # استقبال نص الاعتراض
     if w.get("waiting_objection"):
         if msg_cl.strip() == "الغاء":
             w["waiting_objection"] = False
@@ -265,29 +343,27 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w["waiting_objection"] = False
         save()
 
-        c1n = w["c1"]["n"]
-        c2n = w["c2"]["n"]
-        s1  = w["c1"]["s"]
-        s2  = w["c2"]["s"]
         objection_summary = (
             f"⚖️ اعتراض رسمي مسجّل\n"
             f"━━━━━━━━━━━━━━\n"
             f"👤 مقدّم الاعتراض: {objector}\n"
-            f"📊 النتيجة الحالية: {c1n} {s1} - {s2} {c2n}\n"
+            f"📊 النتيجة الحالية: {w['c1']['n']} {w['c1']['s']} - {w['c2']['s']} {w['c2']['n']}\n"
             f"📝 نص الاعتراض:\n{msg}\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⏳ سيتم البت فيه من الحكام."
+            f"⏳ سيتم البت فيه من المالك."
         )
         await update.message.reply_text(objection_summary)
         return
 
     # ══════════════════════════════════════════
-    # 4. تسجيل القائمة — رد على رسالة اللاعبين
+    # 4. تسجيل القائمة
     # ══════════════════════════════════════════
     if "قائم" in msg_cl and update.message.reply_to_message:
         target_k = None
-        if w["c1"]["n"].upper() in msg_up: target_k = "c1"
-        elif w["c2"]["n"].upper() in msg_up: target_k = "c2"
+        if w["c1"]["n"].upper() in msg_up:
+            target_k = "c1"
+        elif w["c2"]["n"].upper() in msg_up:
+            target_k = "c2"
 
         if not target_k:
             await update.message.reply_text("❌ اكتب اسم الكلان بشكل صحيح مع كلمة قائمة.")
@@ -314,7 +390,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # 5. إضافة نقطة:  SP +1 @p1 @p2 3 1
+    # 5. إضافة نقطة
     # ══════════════════════════════════════════
     if ("+1" in msg_up or "+ 1" in msg_up) and w.get("active"):
         win_k = (
@@ -331,7 +407,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(players) >= 2 and len(scores) >= 2:
             asst = context.bot_data.get(f"asst_{cid}_{w[win_k]['n'].upper()}")
             if not (is_ref or u_tag == w[win_k]["leader"] or u_tag == asst):
-                await update.message.reply_text("❌ التسجيل للحكام والقادة/المساعدين فقط.")
+                await update.message.reply_text("❌ التسجيل للمالك والقادة/المساعدين فقط.")
                 return
 
             u1, u2   = players[0], players[1]
@@ -340,43 +416,43 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             w[win_k]["s"] += 1
             w[win_k]["stats"].append({
-                "name": p_win, "goals": max(sc1,sc2),
-                "rec": min(sc1,sc2), "is_free": False
+                "name": p_win, "goals": max(sc1, sc2),
+                "rec": min(sc1, sc2), "is_free": False
             })
             for m in w["matches"]:
                 p1u, p2u = m["p1"].upper(), m["p2"].upper()
-                if u1.upper() in (p1u,p2u) and u2.upper() in (p1u,p2u):
-                    m["s1"],m["s2"] = (sc1,sc2) if u1.upper()==p1u else (sc2,sc1)
+                if u1.upper() in (p1u, p2u) and u2.upper() in (p1u, p2u):
+                    m["s1"], m["s2"] = (sc1, sc2) if u1.upper() == p1u else (sc2, sc1)
             save()
 
             await update.message.reply_text(
-                f"✅ نقطة لـ {w[win_k]['n']}  |  "
-                f"{u1} {sc1} - {sc2} {u2}"
+                f"✅ نقطة لـ {w[win_k]['n']}  |  {u1} {sc1} - {sc2} {u2}"
             )
             await _update_table(context, cid, w)
 
-            # تغيير اسم الجروب فقط إذا كان المُرسل هو Owner
             if is_creator:
                 try:
                     await context.bot.set_chat_title(
                         cid,
                         f"⚔️ {w['c1']['n']} {w['c1']['s']} - {w['c2']['s']} {w['c2']['n']} ⚔️"
                     )
-                except: pass
+                except:
+                    pass
 
             for pl in players:
                 try:
                     mem = await context.bot.get_chat_member(cid, pl)
                     await context.bot.ban_chat_member(cid, mem.user.id)
                     await context.bot.unban_chat_member(cid, mem.user.id)
-                except: pass
+                except:
+                    pass
 
         else:
             if not is_ref:
-                await update.message.reply_text("❌ النقطة الفري للإدارة فقط.")
+                await update.message.reply_text("❌ النقطة الفري للمالك فقط.")
                 return
             w[win_k]["s"] += 1
-            w[win_k]["stats"].append({"name":"Free","goals":0,"rec":0,"is_free":True})
+            w[win_k]["stats"].append({"name": "Free", "goals": 0, "rec": 0, "is_free": True})
             save()
             await update.message.reply_text(f"⚖️ نقطة فري لكلان {w[win_k]['n']}.")
             await _update_table(context, cid, w)
@@ -395,12 +471,17 @@ async def _make_draw(update, context, cid, w):
     random.shuffle(p1)
     random.shuffle(p2)
     pairs = list(zip(p1, p2))
-    w["matches"] = [{"p1":a,"p2":b,"s1":0,"s2":0} for a,b in pairs]
+    w["matches"] = [{"p1": a, "p2": b, "s1": 0, "s2": 0} for a, b in pairs]
+
+    # ✅ حفظ وقت القرعة
+    w["draw_ts"]   = now_ts()
+    w["reminded_1"] = False
+    w["reminded_2"] = False
     save()
 
     rows = [
         f"{i+1} | {m['p1']} {emoji(0)}|🆚|{emoji(0)} {m['p2']}"
-        for i,m in enumerate(w["matches"])
+        for i, m in enumerate(w["matches"])
     ]
     table = (
         f"🎲 القرعة الرسمية\n"
@@ -425,7 +506,8 @@ async def _make_draw(update, context, cid, w):
         "⏰ سيصلك تذكير بعد يومين."
     )
 
-    asyncio.create_task(task_remind_referee(cid, context))
+    # جدولة التنبيهات
+    asyncio.create_task(task_remind_1(cid, context, TIME_REMIND_1))
 
 
 async def _update_table(context, cid, w):
@@ -433,7 +515,7 @@ async def _update_table(context, cid, w):
         return
     rows = [
         f"{i+1} | {m['p1']} {emoji(m['s1'])}|🆚|{emoji(m['s2'])} {m['p2']}"
-        for i,m in enumerate(w["matches"])
+        for i, m in enumerate(w["matches"])
     ]
     table = (
         f"⚔️ {w['c1']['n']} {w['c1']['s']} - {w['c2']['s']} {w['c2']['n']}\n"
@@ -445,11 +527,13 @@ async def _update_table(context, cid, w):
         await context.bot.edit_message_text(
             table, cid, w["mid"], disable_web_page_preview=True
         )
-    except: pass
+    except:
+        pass
 
 
 async def _end_war(update, context, cid, w, win_k):
     w["active"] = False
+    w["end_ts"] = now_ts()   # ✅ حفظ وقت النهاية
     save()
 
     real = [h for h in w[win_k]["stats"] if not h["is_free"]]
@@ -471,11 +555,18 @@ async def _end_war(update, context, cid, w, win_k):
 
     detail = "\n".join(
         f"{i+1}. {m['p1']} {emoji(m['s1'])} - {emoji(m['s2'])} {m['p2']}"
-        for i,m in enumerate(w["matches"])
+        for i, m in enumerate(w["matches"])
     )
     await update.message.reply_text(f"📊 النتائج الكاملة:\n\n{detail}")
 
-    asyncio.create_task(task_auto_send_after_6h(cid, context))
+    asyncio.create_task(task_auto_send_after_6h(cid, context, TIME_AUTO_END))
+
+
+# ─────────────────────────────────────────────
+#  post_init — يشتغل بعد ما البوت يتشغل مباشرة
+# ─────────────────────────────────────────────
+async def post_init(application):
+    await restore_tasks(application.bot)
 
 
 # ─────────────────────────────────────────────
@@ -486,7 +577,12 @@ if __name__ == "__main__":
 
     load()
 
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
