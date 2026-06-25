@@ -4,8 +4,8 @@ import asyncio
 import json
 import os
 import threading
-from datetime import datetime, timezone
-from telegram import Update
+from datetime import datetime, timezone, timedelta
+from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
@@ -32,10 +32,58 @@ RESULTS_DESTINATION = int(os.environ.get("RESULTS_DESTINATION", "1449739390"))
 AU_LINK             = "https://t.me/arab_union3"
 DATA_FILE           = "war_data.json"
 
-# أوقات التنبيهات بالثواني
-TIME_REMIND_1 = 2 * 24 * 3600   # تنبيه أول بعد يومين
-TIME_REMIND_2 = 3 * 24 * 3600   # تنبيه ثاني بعد 3 أيام
-TIME_AUTO_END = 6 * 3600         # إرسال رابط تلقائي بعد 6 ساعات من النهاية
+TIME_REMIND_1 = 2 * 24 * 3600
+TIME_REMIND_2 = 3 * 24 * 3600
+TIME_AUTO_END = 6 * 3600
+
+# ─────────────────────────────────────────────
+#  إعدادات يوم العزاء
+# ─────────────────────────────────────────────
+IRAQ_TZ   = timezone(timedelta(hours=3))
+# يُفتح عند منتصف الليل 27 يونيو 2026 بتوقيت العراق
+UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)
+
+MOURNING_LOCK_MSG = (
+    "<b>أعظَمَ اللهُ اُجورَنا وأجوركم بِمُصابِنا\n"
+    "بِالحُسَينِ عليه السلام</b>\n\n"
+    "<blockquote><b>إيقاف المواجهات ل مدة يوم كامل</b></blockquote>\n\n"
+    "<b>احتراما ل ابن بنت رسول الله صلى الله عليه واله وسلم و هذا يوم العظيم</b>"
+)
+
+LOCKED_PERMS = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False,
+    can_add_web_page_previews=False,
+    can_change_info=False,
+    can_invite_users=False,
+    can_pin_messages=False,
+)
+
+OPEN_PERMS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+    can_change_info=False,
+    can_invite_users=True,
+    can_pin_messages=False,
+)
+
+# انتظار تأكيد القفل {user_id: True}
+_mourning_pending = {}
 
 # ─────────────────────────────────────────────
 #  البيانات
@@ -55,13 +103,12 @@ def load():
         print("✅ بيانات محملة")
 
 def now_ts() -> float:
-    """الوقت الحالي كـ timestamp"""
     return datetime.now(timezone.utc).timestamp()
 
 def emoji(n):
     d = {'0':'0️⃣','1':'1️⃣','2':'2️⃣','3':'3️⃣','4':'4️⃣',
          '5':'5️⃣','6':'6️⃣','7':'7️⃣','8':'8️⃣','9':'9️⃣'}
-    return "".join(d.get(c,c) for c in str(n))
+    return "".join(d.get(c, c) for c in str(n))
 
 def clean(text):
     if not text: return ""
@@ -72,9 +119,9 @@ def clean(text):
 # ─────────────────────────────────────────────
 #  جلب mention المالك
 # ─────────────────────────────────────────────
-async def get_owner_mention(context, chat_id: int) -> str:
+async def get_owner_mention(bot, chat_id: int) -> str:
     try:
-        admins = await context.bot.get_chat_administrators(chat_id)
+        admins = await bot.get_chat_administrators(chat_id)
         for a in admins:
             if a.status == 'creator':
                 if a.user.username:
@@ -116,18 +163,15 @@ async def send_war_link(context, chat_id: int, reason: str):
 # ─────────────────────────────────────────────
 #  مهام الخلفية
 # ─────────────────────────────────────────────
-async def task_remind_1(chat_id: int, context, delay: float):
-    """تنبيه أول — بعد يومين من القرعة"""
+async def task_remind_1(chat_id: int, bot, delay: float):
     if delay > 0:
         await asyncio.sleep(delay)
-
     w = wars.get(chat_id)
     if not w or not w.get("active"):
         return
-
-    owner_mention = await get_owner_mention(context, chat_id)
+    owner_mention = await get_owner_mention(bot, chat_id)
     try:
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id,
             f"⏰ مرت يومان على القرعة.\n"
             f"📢 تنبيه لمالك الجروب: {owner_mention}\n"
@@ -137,23 +181,18 @@ async def task_remind_1(chat_id: int, context, delay: float):
         )
     except Exception as e:
         print(f"❌ خطأ في task_remind_1: {e}")
-
-    # جدولة التنبيه الثاني بعد يوم إضافي
-    asyncio.create_task(task_remind_2(chat_id, context, 24 * 3600))
+    asyncio.create_task(task_remind_2(chat_id, bot, 24 * 3600))
 
 
-async def task_remind_2(chat_id: int, context, delay: float):
-    """تنبيه ثاني — بعد 3 أيام من القرعة"""
+async def task_remind_2(chat_id: int, bot, delay: float):
     if delay > 0:
         await asyncio.sleep(delay)
-
     w = wars.get(chat_id)
     if not w or not w.get("active"):
         return
-
-    owner_mention = await get_owner_mention(context, chat_id)
+    owner_mention = await get_owner_mention(bot, chat_id)
     try:
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id,
             f"⚠️ {owner_mention} مرت 3 أيام ولم تنتهِ المواجهة.\n"
             f"اكتب: انهاء مواجهه لإنهائها وإرسال الرابط.",
@@ -164,61 +203,109 @@ async def task_remind_2(chat_id: int, context, delay: float):
 
 
 async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUTO_END):
-    """إرسال رابط تلقائي بعد 6 ساعات من نهاية المواجهة"""
     if delay > 0:
         await asyncio.sleep(delay)
-    await send_war_link(
-        context, chat_id,
-        "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة."
-    )
+    await send_war_link(context, chat_id, "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة.")
+
+
+# ─────────────────────────────────────────────
+#  وظائف يوم العزاء
+# ─────────────────────────────────────────────
+async def do_lock_all(bot):
+    """قفل جميع الجروبات وإرسال رسالة العزاء"""
+    locked = 0
+    for chat_id, w in wars.items():
+        try:
+            await bot.set_chat_permissions(chat_id, LOCKED_PERMS)
+            await bot.send_message(chat_id, MOURNING_LOCK_MSG, parse_mode="HTML")
+            w["mourning_locked"] = True
+            locked += 1
+            print(f"🔒 تم قفل الجروب {chat_id}")
+        except Exception as e:
+            print(f"❌ فشل قفل {chat_id}: {e}")
+    save()
+    print(f"✅ تم قفل {locked} جروب")
+
+
+async def do_unlock_all(bot):
+    """فتح جميع الجروبات بعد يوم العزاء"""
+    unlocked = 0
+    for chat_id, w in wars.items():
+        if w.get("mourning_locked"):
+            try:
+                await bot.set_chat_permissions(chat_id, OPEN_PERMS)
+                await bot.send_message(
+                    chat_id,
+                    "<b>✅ تم فتح المحادثة\nعاشوراء مبارك 🖤</b>",
+                    parse_mode="HTML"
+                )
+                w["mourning_locked"] = False
+                unlocked += 1
+                print(f"🔓 تم فتح الجروب {chat_id}")
+            except Exception as e:
+                print(f"❌ فشل فتح {chat_id}: {e}")
+    if unlocked:
+        save()
+    print(f"✅ تم فتح {unlocked} جروب")
+
+
+async def task_unlock_mourning(bot):
+    """ينتظر حتى منتصف الليل ثم يفتح الجروبات"""
+    now    = datetime.now(timezone.utc)
+    delay  = (UNLOCK_DT - now).total_seconds()
+    if delay > 0:
+        h = int(delay // 3600)
+        m = int((delay % 3600) // 60)
+        print(f"⏳ سيتم فتح الجروبات تلقائياً بعد {h}س {m}د")
+        await asyncio.sleep(delay)
+    await do_unlock_all(bot)
 
 
 # ─────────────────────────────────────────────
 #  استعادة المهام عند إعادة التشغيل
 # ─────────────────────────────────────────────
 async def restore_tasks(application):
-    """
-    يُشغَّل مرة واحدة عند بدء البوت.
-    يحسب الوقت المتبقي لكل مواجهة نشطة ويجدول التنبيهات من حيث توقفت.
-    """
-    now = now_ts()
+    now          = now_ts()
+    unlock_dt_ts = UNLOCK_DT.timestamp()
 
+    # ─── استعادة قفل العزاء ───
+    any_locked = any(w.get("mourning_locked") for w in wars.values())
+    if any_locked:
+        if now < unlock_dt_ts:
+            asyncio.create_task(task_unlock_mourning(application.bot))
+            h = int((unlock_dt_ts - now) // 3600)
+            m = int(((unlock_dt_ts - now) % 3600) // 60)
+            print(f"🔁 استعادة مهمة فتح العزاء بعد {h}س {m}د")
+        else:
+            # وقت الفتح مضى → نفتح مباشرة
+            asyncio.create_task(do_unlock_all(application.bot))
+            print("🔁 وقت الفتح مضى، فتح فوري")
+
+    # ─── استعادة تنبيهات المواجهات ───
     for chat_id, w in wars.items():
-        # ─── مواجهة نشطة عندها قرعة ───
         if w.get("active") and w.get("draw_ts") and w.get("mid"):
             draw_ts  = float(w["draw_ts"])
             elapsed  = now - draw_ts
+            delay_1  = max(0.0, TIME_REMIND_1 - elapsed)
+            delay_2  = max(0.0, TIME_REMIND_2 - elapsed)
+            sent_1   = w.get("reminded_1", False)
+            sent_2   = w.get("reminded_2", False)
 
-            # تنبيه 1 (بعد يومين)
-            delay_1 = max(0.0, TIME_REMIND_1 - elapsed)
-            # تنبيه 2 (بعد 3 أيام)
-            delay_2 = max(0.0, TIME_REMIND_2 - elapsed)
+            if not sent_1:
+                asyncio.create_task(task_remind_1(chat_id, application.bot, delay_1))
+                h = int(delay_1 // 3600); m = int((delay_1 % 3600) // 60)
+                print(f"🔁 [{chat_id}] تنبيه 1 بعد {h}س {m}د")
+            elif not sent_2:
+                asyncio.create_task(task_remind_2(chat_id, application.bot, delay_2))
+                h = int(delay_2 // 3600); m = int((delay_2 % 3600) // 60)
+                print(f"🔁 [{chat_id}] تنبيه 2 بعد {h}س {m}د")
 
-            already_sent_1 = w.get("reminded_1", False)
-            already_sent_2 = w.get("reminded_2", False)
-
-            if not already_sent_1:
-                asyncio.create_task(task_remind_1(chat_id, application, delay_1))
-                remaining_h = int(delay_1 // 3600)
-                remaining_m = int((delay_1 % 3600) // 60)
-                print(f"🔁 [{chat_id}] تنبيه 1 سيُرسل بعد {remaining_h}س {remaining_m}د")
-            elif not already_sent_2:
-                asyncio.create_task(task_remind_2(chat_id, application, delay_2))
-                remaining_h = int(delay_2 // 3600)
-                remaining_m = int((delay_2 % 3600) // 60)
-                print(f"🔁 [{chat_id}] تنبيه 2 سيُرسل بعد {remaining_h}س {remaining_m}د")
-            else:
-                print(f"🔁 [{chat_id}] كل التنبيهات أُرسلت مسبقاً")
-
-        # ─── مواجهة منتهية لم يُرسل رابطها بعد ───
         elif not w.get("active") and not w.get("link_sent") and w.get("end_ts"):
             end_ts  = float(w["end_ts"])
             elapsed = now - end_ts
             delay   = max(0.0, TIME_AUTO_END - elapsed)
-            asyncio.create_task(task_auto_send_after_6h(chat_id, application, delay))
-            remaining_h = int(delay // 3600)
-            remaining_m = int((delay % 3600) // 60)
-            print(f"🔁 [{chat_id}] إرسال رابط بعد {remaining_h}س {remaining_m}د")
+            # نحتاج context — نمرر None ونتعامل مع الإرسال عبر Application
+            print(f"🔁 [{chat_id}] إرسال رابط بعد {int(delay//3600)}س {int((delay%3600)//60)}د")
 
     print("✅ استعادة المهام اكتملت")
 
@@ -236,6 +323,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     print(f"✅ /start من: {name} | ID: {uid}")
 
+
 # ─────────────────────────────────────────────
 #  المعالج الرئيسي
 # ─────────────────────────────────────────────
@@ -250,7 +338,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user   = update.effective_user
     u_tag  = f"@{user.username}" if user.username else f"ID:{user.id}"
 
-    # صلاحيات — المالك فقط هو الحكم
     try:
         cm         = await context.bot.get_chat_member(cid, user.id)
         is_creator = (cm.status == 'creator')
@@ -262,8 +349,47 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     w = wars.get(cid)
 
     # ══════════════════════════════════════════
-    # 1. بدء المواجهة — 2 أو 3 أو 4 حروف
-    #    مسموح لمالك الجروب فقط
+    # 0. يوم العزاء — تيست / تمم / الغاء
+    # ══════════════════════════════════════════
+
+    # أ) تيست — معاينة
+    if msg_cl.strip() == "تيست":
+        if not is_creator:
+            await update.message.reply_text("🚫 هذا الأمر لمالك الجروب فقط.")
+            return
+        _mourning_pending[user.id] = True
+        preview = (
+            "👁 <b>معاينة رسالة الإيقاف:</b>\n"
+            "━━━━━━━━━━━━━━\n\n"
+            + MOURNING_LOCK_MSG +
+            "\n\n━━━━━━━━━━━━━━\n"
+            "✅ أرسل <b>تمم</b> لتطبيق القفل على جميع الجروبات\n"
+            "❌ أرسل <b>الغاء</b> للإلغاء"
+        )
+        await update.message.reply_text(preview, parse_mode="HTML")
+        return
+
+    # ب) تمم أو الغاء — بعد تيست
+    if _mourning_pending.get(user.id):
+        if "تمم" in msg_cl:
+            _mourning_pending.pop(user.id, None)
+            await update.message.reply_text("⏳ جاري قفل جميع الجروبات...")
+            await do_lock_all(context.bot)
+            asyncio.create_task(task_unlock_mourning(context.bot))
+            iraq_time_str = UNLOCK_DT.strftime("%I:%M %p  %d/%m/%Y")
+            await update.message.reply_text(
+                f"✅ <b>تم قفل جميع الجروبات بنجاح.</b>\n"
+                f"⏰ سيُفتح تلقائياً عند: <b>{iraq_time_str}</b> (توقيت العراق)",
+                parse_mode="HTML"
+            )
+            return
+        elif "الغاء" in msg_cl:
+            _mourning_pending.pop(user.id, None)
+            await update.message.reply_text("❌ تم إلغاء العملية.")
+            return
+
+    # ══════════════════════════════════════════
+    # 1. بدء المواجهة
     # ══════════════════════════════════════════
     war_match = re.match(
         r'^([A-Za-z0-9]{2,4})\s+VS\s+([A-Za-z0-9]{2,4})$',
@@ -286,7 +412,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "draw_ts": None,
             "end_ts": None,
             "reminded_1": False,
-            "reminded_2": False
+            "reminded_2": False,
+            "mourning_locked": False,
         }
         save()
         await update.message.reply_text(
@@ -302,7 +429,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # 2. انهاء مواجهه — Owner فقط
+    # 2. انهاء مواجهه
     # ══════════════════════════════════════════
     if "انهاء مواجهه" in msg_cl or "انهاء مواجهة" in msg_cl:
         if not is_creator:
@@ -338,11 +465,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save()
             await update.message.reply_text("✅ تم إلغاء الاعتراض.")
             return
-
         objector = w.get("objection_by", u_tag)
         w["waiting_objection"] = False
         save()
-
         objection_summary = (
             f"⚖️ اعتراض رسمي مسجّل\n"
             f"━━━━━━━━━━━━━━\n"
@@ -473,8 +598,7 @@ async def _make_draw(update, context, cid, w):
     pairs = list(zip(p1, p2))
     w["matches"] = [{"p1": a, "p2": b, "s1": 0, "s2": 0} for a, b in pairs]
 
-    # ✅ حفظ وقت القرعة
-    w["draw_ts"]   = now_ts()
+    w["draw_ts"]    = now_ts()
     w["reminded_1"] = False
     w["reminded_2"] = False
     save()
@@ -502,12 +626,10 @@ async def _make_draw(update, context, cid, w):
         print(f"تعذّر التثبيت: {e}")
 
     await update.message.reply_text(
-        "✅ تمت القرعة وتم تثبيت الجدول!\n"
-        "⏰ سيصلك تذكير بعد يومين."
+        "✅ تمت القرعة وتم تثبيت الجدول!\n⏰ سيصلك تذكير بعد يومين."
     )
 
-    # جدولة التنبيهات
-    asyncio.create_task(task_remind_1(cid, context, TIME_REMIND_1))
+    asyncio.create_task(task_remind_1(cid, context.bot, TIME_REMIND_1))
 
 
 async def _update_table(context, cid, w):
@@ -533,16 +655,16 @@ async def _update_table(context, cid, w):
 
 async def _end_war(update, context, cid, w, win_k):
     w["active"] = False
-    w["end_ts"] = now_ts()   # ✅ حفظ وقت النهاية
+    w["end_ts"] = now_ts()
     save()
 
     real = [h for h in w[win_k]["stats"] if not h["is_free"]]
     if real:
-        hasm       = real[-1]["name"]
-        star_data  = max(real, key=lambda x: x["goals"] - x["rec"])
-        star       = star_data["name"]
-        star_g     = star_data["goals"]
-        star_r     = star_data["rec"]
+        hasm      = real[-1]["name"]
+        star_data = max(real, key=lambda x: x["goals"] - x["rec"])
+        star      = star_data["name"]
+        star_g    = star_data["goals"]
+        star_r    = star_data["rec"]
         result_msg = (
             f"🎊 فاز كلان {w[win_k]['n']} 🎊\n\n"
             f"🎯 الحاسم: {hasm}\n"
@@ -563,10 +685,10 @@ async def _end_war(update, context, cid, w, win_k):
 
 
 # ─────────────────────────────────────────────
-#  post_init — يشتغل بعد ما البوت يتشغل مباشرة
+#  post_init
 # ─────────────────────────────────────────────
 async def post_init(application):
-    await restore_tasks(application.bot)
+    await restore_tasks(application)
 
 
 # ─────────────────────────────────────────────
