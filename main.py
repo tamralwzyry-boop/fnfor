@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    filters, ContextTypes, ChatMemberHandler
 )
 from flask import Flask
 
@@ -41,7 +41,8 @@ TIME_AUTO_END = 6 * 3600
 #  إعدادات يوم العزاء
 # ─────────────────────────────────────────────
 IRAQ_TZ   = timezone(timedelta(hours=3))
-UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)  # منتصف ليل 27 يونيو بتوقيت العراق
+LOCK_DT   = datetime(2026, 6, 26, 0, 0, 0, tzinfo=IRAQ_TZ)   # بداية القفل
+UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)   # نهاية القفل
 
 MOURNING_LOCK_MSG = (
     "<b>أعظَمَ اللهُ اُجورَنا وأجوركم بِمُصابِنا\n"
@@ -103,9 +104,9 @@ def load():
         print("✅ بيانات الحرب محملة")
 
 # ─────────────────────────────────────────────
-#  قاعدة جميع الجروبات التي يراها البوت
+#  قاعدة جميع الجروبات
 # ─────────────────────────────────────────────
-all_chats = {}   # { chat_id: {"mourning_locked": bool} }
+all_chats = {}
 
 def save_chats():
     with open(ALL_CHATS_FILE, 'w', encoding='utf-8') as f:
@@ -119,11 +120,59 @@ def load_chats():
         all_chats = {int(k): v for k, v in data.items()}
         print(f"✅ {len(all_chats)} جروب محمل في القاعدة")
 
-def register_chat(chat_id: int):
-    """تسجيل الجروب في القاعدة إن لم يكن موجوداً"""
-    if chat_id not in all_chats:
+def is_mourning_active() -> bool:
+    """هل فترة العزاء نشطة الآن؟"""
+    now = datetime.now(timezone.utc)
+    return LOCK_DT <= now < UNLOCK_DT
+
+# ─────────────────────────────────────────────
+#  تسجيل جروب + قفل تلقائي لو في فترة العزاء
+# ─────────────────────────────────────────────
+async def register_chat(chat_id: int, bot=None):
+    """
+    تسجيل الجروب في القاعدة.
+    لو في فترة العزاء والجروب مش مقفول → يقفله فوراً.
+    """
+    is_new = chat_id not in all_chats
+
+    if is_new:
         all_chats[chat_id] = {"mourning_locked": False}
+
+    if is_mourning_active() and not all_chats[chat_id].get("mourning_locked") and bot:
+        try:
+            await bot.set_chat_permissions(chat_id, LOCKED_PERMS)
+            await bot.send_message(chat_id, MOURNING_LOCK_MSG, parse_mode="HTML")
+            all_chats[chat_id]["mourning_locked"] = True
+            print(f"🔒 قفل تلقائي للجروب الجديد {chat_id}")
+        except Exception as e:
+            print(f"❌ فشل قفل الجروب الجديد {chat_id}: {e}")
+
+    if is_new or all_chats[chat_id].get("mourning_locked"):
         save_chats()
+
+# ─────────────────────────────────────────────
+#  Handler: لما البوت يتضاف/يتطرد
+# ─────────────────────────────────────────────
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.my_chat_member
+    if not result:
+        return
+
+    chat       = result.chat
+    new_status = result.new_chat_member.status
+
+    if chat.type == "private":
+        return
+
+    if new_status in ("member", "administrator"):
+        print(f"➕ البوت اتضاف لجروب: {chat.title} ({chat.id})")
+        await register_chat(chat.id, bot=context.bot)
+
+    elif new_status in ("left", "kicked"):
+        if chat.id in all_chats:
+            del all_chats[chat.id]
+            save_chats()
+            print(f"🗑 تم حذف الجروب: {chat.title} ({chat.id})")
 
 # ─────────────────────────────────────────────
 #  دوال مساعدة
@@ -228,7 +277,7 @@ async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUT
 #  وظائف يوم العزاء
 # ─────────────────────────────────────────────
 async def do_lock_all(bot):
-    """قفل جميع الجروبات المعروفة وإرسال رسالة العزاء"""
+    """قفل جميع الجروبات وإرسال رسالة العزاء"""
     locked = 0
     failed = 0
     for chat_id, info in all_chats.items():
@@ -322,9 +371,8 @@ async def restore_tasks(application):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name
-    # تسجيل الجروب
     if update.effective_chat.type != "private":
-        register_chat(update.effective_chat.id)
+        await register_chat(update.effective_chat.id, bot=context.bot)
     await update.message.reply_text(
         f"👋 أهلاً {name}!\n"
         f"🆔 الـ chat_id الخاص بك: {uid}\n\n"
@@ -348,7 +396,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ─── تسجيل الجروب تلقائياً ───
     if update.effective_chat.type != "private":
-        register_chat(cid)
+        await register_chat(cid, bot=context.bot)
 
     # ─── صلاحيات ───
     try:
@@ -364,7 +412,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ══════════════════════════════════════════
     # 0. يوم العزاء — تيست / تمم / الغاء
     # ══════════════════════════════════════════
-
     if msg_cl.strip() == "تيست":
         if not is_creator:
             await update.message.reply_text("🚫 هذا الأمر لمالك الجروب فقط.")
@@ -687,10 +734,11 @@ if __name__ == "__main__":
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
     print("✅ البوت يعمل...")
     print(f"📊 عدد الجروبات المسجلة: {len(all_chats)}")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
 
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
