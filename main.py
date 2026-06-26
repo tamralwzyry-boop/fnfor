@@ -730,7 +730,7 @@ async def post_init(application):
             parse_mode="HTML"
         )
     except Exception as e:
-        print(f"❌ فشل إشعار التشغيل: {e}")
+      print(f"❌ فشل إشعار التشغيل: {e}")
 
     # ─── فتح فوري لأي جروبات مقفولة ───
     await do_unlock_all(bot)
