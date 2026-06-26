@@ -132,18 +132,29 @@ async def register_chat(chat_id: int, bot=None):
 
     if is_new:
         all_chats[chat_id] = {"mourning_locked": False}
+        # جروب جديد وفترة العزاء انتهت → افتحه فوراً
+        if bot and not is_mourning_active():
+            try:
+                await bot.set_chat_permissions(chat_id, OPEN_PERMS)
+                await bot.send_message(
+                    chat_id,
+                    "<b>سيتم استئناف المواجهات الان بعد انتهاء المده المحدده</b>",
+                    parse_mode="HTML"
+                )
+                print(f"🔓 فتح تلقائي للجروب {chat_id}")
+            except Exception as e:
+                print(f"⚠️ {chat_id}: {e}")
+        save_chats()
 
-    if is_mourning_active() and not all_chats[chat_id].get("mourning_locked") and bot:
+    elif is_mourning_active() and not all_chats[chat_id].get("mourning_locked") and bot:
         try:
             await bot.set_chat_permissions(chat_id, LOCKED_PERMS)
             await bot.send_message(chat_id, MOURNING_LOCK_MSG, parse_mode="HTML")
             all_chats[chat_id]["mourning_locked"] = True
-            print(f"🔒 قفل تلقائي للجروب الجديد {chat_id}")
+            save_chats()
+            print(f"🔒 قفل تلقائي للجروب {chat_id}")
         except Exception as e:
-            print(f"❌ فشل قفل الجروب الجديد {chat_id}: {e}")
-
-    if is_new or all_chats[chat_id].get("mourning_locked"):
-        save_chats()
+            print(f"❌ فشل قفل الجروب {chat_id}: {e}")
 
 # ─────────────────────────────────────────────
 #  Handler: لما البوت يتضاف/يتطرد
