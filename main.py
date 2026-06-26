@@ -41,8 +41,8 @@ TIME_AUTO_END = 6 * 3600
 #  إعدادات يوم العزاء
 # ─────────────────────────────────────────────
 IRAQ_TZ   = timezone(timedelta(hours=3))
-LOCK_DT   = datetime(2026, 6, 26, 0, 0, 0, tzinfo=IRAQ_TZ)   # بداية القفل
-UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)   # نهاية القفل
+LOCK_DT   = datetime(2026, 6, 26, 0, 0, 0, tzinfo=IRAQ_TZ)
+UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)
 
 MOURNING_LOCK_MSG = (
     "<b>أعظَمَ اللهُ اُجورَنا وأجوركم بِمُصابِنا\n"
@@ -121,7 +121,6 @@ def load_chats():
         print(f"✅ {len(all_chats)} جروب محمل في القاعدة")
 
 def is_mourning_active() -> bool:
-    """هل فترة العزاء نشطة الآن؟"""
     now = datetime.now(timezone.utc)
     return LOCK_DT <= now < UNLOCK_DT
 
@@ -129,10 +128,6 @@ def is_mourning_active() -> bool:
 #  تسجيل جروب + قفل تلقائي لو في فترة العزاء
 # ─────────────────────────────────────────────
 async def register_chat(chat_id: int, bot=None):
-    """
-    تسجيل الجروب في القاعدة.
-    لو في فترة العزاء والجروب مش مقفول → يقفله فوراً.
-    """
     is_new = chat_id not in all_chats
 
     if is_new:
@@ -205,19 +200,38 @@ async def get_owner_mention(bot, chat_id: int) -> str:
     return "مالك الجروب"
 
 # ─────────────────────────────────────────────
+#  جلب رابط الجروب الفعلي
+# ─────────────────────────────────────────────
+async def get_group_link(bot, chat_id: int) -> str:
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.username:
+            return f"https://t.me/{chat.username}"
+        if chat.invite_link:
+            return chat.invite_link
+        # توليد رابط دعوة جديد
+        return await bot.export_chat_invite_link(chat_id)
+    except Exception as e:
+        print(f"⚠️ تعذّر جلب رابط الجروب {chat_id}: {e}")
+        return f"https://t.me/c/{str(chat_id).replace('-100', '')}"
+
+# ─────────────────────────────────────────────
 #  إرسال رابط المواجهة
 # ─────────────────────────────────────────────
 async def send_war_link(context, chat_id: int, reason: str):
     w = wars.get(chat_id)
     if not w or w.get("link_sent"):
         return
-    c1, c2   = w["c1"]["n"], w["c2"]["n"]
-    s1, s2   = w["c1"]["s"], w["c2"]["s"]
-    src_link = w.get("source_link", "—")
+    c1, c2 = w["c1"]["n"], w["c2"]["n"]
+    s1, s2 = w["c1"]["s"], w["c2"]["s"]
+
+    # رابط الجروب الفعلي وليس رابط رسالة
+    group_link = await get_group_link(context.bot, chat_id)
+
     text = (
         f"📋 {reason}\n\n"
         f"⚔️ المواجهة: {c1} {s1} - {s2} {c2}\n"
-        f"🔗 رابط المواجهة: {src_link}\n"
+        f"🔗 رابط الجروب: {group_link}\n"
         f"🆔 ID الجروب: {chat_id}"
     )
     try:
@@ -277,7 +291,6 @@ async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUT
 #  وظائف يوم العزاء
 # ─────────────────────────────────────────────
 async def do_lock_all(bot):
-    """قفل جميع الجروبات وإرسال رسالة العزاء"""
     locked = 0
     failed = 0
     for chat_id, info in all_chats.items():
@@ -295,7 +308,7 @@ async def do_lock_all(bot):
     return locked, failed
 
 async def do_unlock_all(bot):
-    """فتح جميع الجروبات المقفولة بسبب العزاء"""
+    """فتح جميع الجروبات المقفولة فوراً بدون انتظار"""
     unlocked = 0
     for chat_id, info in all_chats.items():
         if info.get("mourning_locked"):
@@ -303,7 +316,7 @@ async def do_unlock_all(bot):
                 await bot.set_chat_permissions(chat_id, OPEN_PERMS)
                 await bot.send_message(
                     chat_id,
-                    "<b>✅ تم فتح المحادثة\nعاشوراء مبارك 🖤</b>",
+                    "<b>سيتم استئناف المواجهات الان بعد انتهاء المده المحدده</b>",
                     parse_mode="HTML"
                 )
                 info["mourning_locked"] = False
@@ -316,34 +329,20 @@ async def do_unlock_all(bot):
     print(f"✅ تم فتح {unlocked} جروب")
 
 async def task_unlock_mourning(bot):
-    """ينتظر حتى منتصف الليل ثم يفتح الجروبات"""
-    now   = datetime.now(timezone.utc)
-    delay = (UNLOCK_DT - now).total_seconds()
-    if delay > 0:
-        h = int(delay // 3600)
-        m = int((delay % 3600) // 60)
-        print(f"⏳ سيتم فتح الجروبات تلقائياً بعد {h}س {m}د")
-        await asyncio.sleep(delay)
+    """فتح فوري بدون انتظار منتصف الليل"""
     await do_unlock_all(bot)
 
 # ─────────────────────────────────────────────
 #  استعادة المهام عند إعادة التشغيل
 # ─────────────────────────────────────────────
 async def restore_tasks(application):
-    now          = now_ts()
-    unlock_dt_ts = UNLOCK_DT.timestamp()
+    now = now_ts()
 
-    # ─── استعادة قفل العزاء ───
+    # ─── فتح فوري لأي جروبات مقفولة ───
     any_locked = any(v.get("mourning_locked") for v in all_chats.values())
     if any_locked:
-        if now < unlock_dt_ts:
-            asyncio.create_task(task_unlock_mourning(application.bot))
-            rem   = unlock_dt_ts - now
-            h, m  = int(rem // 3600), int((rem % 3600) // 60)
-            print(f"🔁 استعادة مهمة الفتح — بعد {h}س {m}د")
-        else:
-            asyncio.create_task(do_unlock_all(application.bot))
-            print("🔁 وقت الفتح مضى → فتح فوري")
+        asyncio.create_task(do_unlock_all(application.bot))
+        print("🔁 يوجد جروبات مقفولة → فتح فوري")
 
     # ─── استعادة تنبيهات المواجهات ───
     for chat_id, w in wars.items():
@@ -366,19 +365,13 @@ async def restore_tasks(application):
     print("✅ استعادة المهام اكتملت")
 
 # ─────────────────────────────────────────────
-#  /start
+#  /start — صامت (لا يرد)
 # ─────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
-    name = update.effective_user.first_name
+    # تسجيل الجروب فقط إن كان من جروب، بدون أي رد
     if update.effective_chat.type != "private":
         await register_chat(update.effective_chat.id, bot=context.bot)
-    await update.message.reply_text(
-        f"👋 أهلاً {name}!\n"
-        f"🆔 الـ chat_id الخاص بك: {uid}\n\n"
-        f"ضع هذا الرقم في RESULTS_DESTINATION لتستقبل روابط المواجهات."
-    )
-    print(f"✅ /start من: {name} | ID: {uid}")
+    return
 
 # ─────────────────────────────────────────────
 #  المعالج الرئيسي
@@ -439,12 +432,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
             locked, failed = await do_lock_all(context.bot)
+            # فتح فوري بدون انتظار منتصف الليل
             asyncio.create_task(task_unlock_mourning(context.bot))
-            iraq_str = UNLOCK_DT.strftime("%I:%M %p  %d/%m/%Y")
             await update.message.reply_text(
                 f"✅ <b>تم قفل {locked} جروب بنجاح</b>"
                 + (f"\n⚠️ فشل القفل في {failed} جروب" if failed else "") +
-                f"\n⏰ سيُفتح تلقائياً: <b>{iraq_str}</b> (توقيت العراق)",
+                f"\n⏰ سيُفتح تلقائياً قريباً",
                 parse_mode="HTML"
             )
             return
@@ -470,7 +463,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "c1": {"n": c1, "s": 0, "p": [], "stats": [], "leader": None},
             "c2": {"n": c2, "s": 0, "p": [], "stats": [], "leader": None},
             "active": True, "mid": None, "matches": [],
-            "source_link": f"https://t.me/c/{str(cid).replace('-100','')}/1",
             "link_sent": False,
             "waiting_objection": False,
             "draw_ts": None,
