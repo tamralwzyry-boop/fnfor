@@ -719,21 +719,49 @@ async def _end_war(update, context, cid, w, win_k):
 async def post_init(application):
     bot = application.bot
 
+    # ─── استيراد الجروبات من بيانات الحرب لو all_chats فاضي ───
+    synced = 0
+    for chat_id in wars:
+        if chat_id not in all_chats:
+            all_chats[chat_id] = {"mourning_locked": True}
+            synced += 1
+    if synced:
+        save_chats()
+        print(f"🔄 تم استيراد {synced} جروب من بيانات الحرب")
+
+    # ─── فتح قسري لجميع الجروبات المعروفة ───
+    unlocked = 0
+    failed   = 0
+    for chat_id, info in all_chats.items():
+        try:
+            await bot.set_chat_permissions(chat_id, OPEN_PERMS)
+            await bot.send_message(
+                chat_id,
+                "<b>سيتم استئناف المواجهات الان بعد انتهاء المده المحدده</b>",
+                parse_mode="HTML"
+            )
+            info["mourning_locked"] = False
+            unlocked += 1
+            print(f"🔓 فُتح {chat_id}")
+        except Exception as e:
+            failed += 1
+            print(f"❌ فشل فتح {chat_id}: {e}")
+    if unlocked:
+        save_chats()
+
     # ─── إشعار تشغيل ───
-    locked_count = sum(1 for v in all_chats.values() if v.get("mourning_locked"))
     try:
         await bot.send_message(
             RESULTS_DESTINATION,
             f"✅ <b>البوت اشتغل</b>\n"
             f"📊 جروبات مسجلة: <b>{len(all_chats)}</b>\n"
-            f"🔒 جروبات مقفولة: <b>{locked_count}</b>",
+            f"🔓 جروبات فُتحت: <b>{unlocked}</b>"
+            + (f"\n⚠️ فشل فتح: <b>{failed}</b>" if failed else ""),
             parse_mode="HTML"
         )
     except Exception as e:
-      print(f"❌ فشل إشعار التشغيل: {e}")
+        print(f"❌ فشل إشعار التشغيل: {e}")
 
-    # ─── فتح فوري لأي جروبات مقفولة ───
-    await do_unlock_all(bot)
     await restore_tasks(application)
 
 # ─────────────────────────────────────────────
