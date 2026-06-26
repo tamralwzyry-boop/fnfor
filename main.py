@@ -397,6 +397,21 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     w = wars.get(cid)
 
     # ══════════════════════════════════════════
+    # 0.5 أمر حالة — للتشخيص
+    # ══════════════════════════════════════════
+    if msg_cl.strip() == "حاله" or msg_cl.strip() == "حالة":
+        locked_count = sum(1 for v in all_chats.values() if v.get("mourning_locked"))
+        await update.message.reply_text(
+            f"🤖 <b>البوت شغال</b>\n"
+            f"📊 جروبات مسجلة: <b>{len(all_chats)}</b>\n"
+            f"🔒 جروبات مقفولة: <b>{locked_count}</b>\n"
+            f"⚔️ مواجهات نشطة: <b>{sum(1 for w in wars.values() if w.get('active'))}</b>\n"
+            f"🆔 ID الجروب ده: <code>{cid}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # ══════════════════════════════════════════
     # 0. يوم العزاء — تيست / تمم / الغاء
     # ══════════════════════════════════════════
     if msg_cl.strip() == "تيست":
@@ -702,8 +717,23 @@ async def _end_war(update, context, cid, w, win_k):
 #  post_init
 # ─────────────────────────────────────────────
 async def post_init(application):
-    # فتح فوري لأي جروبات مقفولة فور تشغيل البوت
-    await do_unlock_all(application.bot)
+    bot = application.bot
+
+    # ─── إشعار تشغيل ───
+    locked_count = sum(1 for v in all_chats.values() if v.get("mourning_locked"))
+    try:
+        await bot.send_message(
+            RESULTS_DESTINATION,
+            f"✅ <b>البوت اشتغل</b>\n"
+            f"📊 جروبات مسجلة: <b>{len(all_chats)}</b>\n"
+            f"🔒 جروبات مقفولة: <b>{locked_count}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"❌ فشل إشعار التشغيل: {e}")
+
+    # ─── فتح فوري لأي جروبات مقفولة ───
+    await do_unlock_all(bot)
     await restore_tasks(application)
 
 # ─────────────────────────────────────────────
