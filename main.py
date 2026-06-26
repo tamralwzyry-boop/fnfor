@@ -42,7 +42,7 @@ TIME_AUTO_END = 6 * 3600
 # ─────────────────────────────────────────────
 IRAQ_TZ   = timezone(timedelta(hours=3))
 LOCK_DT   = datetime(2026, 6, 26, 0, 0, 0, tzinfo=IRAQ_TZ)
-UNLOCK_DT = datetime(2026, 6, 27, 0, 0, 0, tzinfo=IRAQ_TZ)
+UNLOCK_DT = datetime(2026, 6, 26, 12, 0, 0, tzinfo=IRAQ_TZ)  # وقت في الماضي → العزاء انتهى
 
 MOURNING_LOCK_MSG = (
     "<b>أعظَمَ اللهُ اُجورَنا وأجوركم بِمُصابِنا\n"
@@ -338,12 +338,6 @@ async def task_unlock_mourning(bot):
 async def restore_tasks(application):
     now = now_ts()
 
-    # ─── فتح فوري لأي جروبات مقفولة ───
-    any_locked = any(v.get("mourning_locked") for v in all_chats.values())
-    if any_locked:
-        asyncio.create_task(do_unlock_all(application.bot))
-        print("🔁 يوجد جروبات مقفولة → فتح فوري")
-
     # ─── استعادة تنبيهات المواجهات ───
     for chat_id, w in wars.items():
         if w.get("active") and w.get("draw_ts") and w.get("mid"):
@@ -432,8 +426,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
             locked, failed = await do_lock_all(context.bot)
-            # فتح فوري بدون انتظار منتصف الليل
-            asyncio.create_task(task_unlock_mourning(context.bot))
+            # فتح فوري بعد القفل مباشرة (للتيست)
+            asyncio.create_task(do_unlock_all(context.bot))
             await update.message.reply_text(
                 f"✅ <b>تم قفل {locked} جروب بنجاح</b>"
                 + (f"\n⚠️ فشل القفل في {failed} جروب" if failed else "") +
@@ -708,6 +702,8 @@ async def _end_war(update, context, cid, w, win_k):
 #  post_init
 # ─────────────────────────────────────────────
 async def post_init(application):
+    # فتح فوري لأي جروبات مقفولة فور تشغيل البوت
+    await do_unlock_all(application.bot)
     await restore_tasks(application)
 
 # ─────────────────────────────────────────────
