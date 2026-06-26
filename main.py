@@ -719,6 +719,28 @@ async def _end_war(update, context, cid, w, win_k):
 async def post_init(application):
     bot = application.bot
 
+    # ─── ديباج: وين الملفات وايه اللي موجود ───
+    import os
+    cwd = os.getcwd()
+    war_exists   = os.path.exists(DATA_FILE)
+    chats_exists = os.path.exists(ALL_CHATS_FILE)
+    print(f"📁 Working dir: {cwd}")
+    print(f"📄 war_data.json موجود: {war_exists} | all_chats.json موجود: {chats_exists}")
+    print(f"⚔️ عدد الحروب المحملة: {len(wars)} | عدد الجروبات: {len(all_chats)}")
+    try:
+        await application.bot.send_message(
+            RESULTS_DESTINATION,
+            f"🔍 <b>ديباج</b>\n"
+            f"📁 مسار العمل: <code>{cwd}</code>\n"
+            f"📄 war_data.json: {'✅' if war_exists else '❌'}\n"
+            f"📄 all_chats.json: {'✅' if chats_exists else '❌'}\n"
+            f"⚔️ حروب محملة: <b>{len(wars)}</b>\n"
+            f"👥 جروبات: <b>{len(all_chats)}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"❌ {e}")
+
     # ─── استيراد الجروبات من بيانات الحرب لو all_chats فاضي ───
     synced = 0
     for chat_id in wars:
