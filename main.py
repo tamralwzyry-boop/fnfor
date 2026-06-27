@@ -223,11 +223,6 @@ async def restore_tasks(application):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"👋 أهلاً {name}!\n"
-        f"🆔 الـ chat_id الخاص بك: {uid}\n\n"
-        f"ضع هذا الرقم في RESULTS_DESTINATION لتستقبل روابط المواجهات."
-    )
     print(f"✅ /start من: {name} | ID: {uid}")
 
 # ─────────────────────────────────────────────
