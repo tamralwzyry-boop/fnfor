@@ -56,6 +56,9 @@ SETIMAGE_ALIASES = {
     "دوري": "دوري", "اخرى": "دوري", "أخرى": "دوري",
 }
 
+# كلمات تشغيل أمر الرابط
+LINK_TRIGGERS = {"الرابط", "رابط", "لينك", "link", "الينك"}
+
 def detect_stage(text: str):
     t = text.strip()
     c = clean(t)
@@ -147,6 +150,55 @@ async def get_owner_mention(context, chat_id: int) -> str:
     except:
         pass
     return "مالك الجروب"
+
+# ─────────────────────────────────────────────
+#  جلب / إنشاء رابط دعوة للجروب (يعمل حتى لو Private)
+# ─────────────────────────────────────────────
+async def get_group_invite_link(context, chat_id: int) -> str | None:
+    """
+    يحاول جلب رابط الجروب بعدة طرق:
+    1) لو الجروب عنده يوزرنيم عام -> يرجع t.me/username مباشرة.
+    2) غير كده يحاول export_chat_invite_link (يرجع نفس الرابط الثابت للجروب لو موجود).
+    3) لو فشلت يحاول ينشئ رابط دعوة جديد create_chat_invite_link.
+    """
+    # 1) لو الجروب Public
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        if chat.username:
+            return f"https://t.me/{chat.username}"
+    except Exception as e:
+        print(f"⚠️ get_chat فشل: {e}")
+
+    # 2) رابط الدعوة الأساسي (export)
+    try:
+        link = await context.bot.export_chat_invite_link(chat_id)
+        if link:
+            return link
+    except Exception as e:
+        print(f"⚠️ export_chat_invite_link فشل: {e}")
+
+    # 3) إنشاء رابط دعوة جديد
+    try:
+        invite = await context.bot.create_chat_invite_link(chat_id)
+        if invite and invite.invite_link:
+            return invite.invite_link
+    except Exception as e:
+        print(f"❌ create_chat_invite_link فشل: {e}")
+
+    return None
+
+async def cmd_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يرد برابط الجروب الحالي عند كتابة: الرابط / رابط"""
+    cid = update.effective_chat.id
+    link = await get_group_invite_link(context, cid)
+    if link:
+        await update.message.reply_text(f"🔗 رابط الجروب:\n{link}")
+    else:
+        await update.message.reply_text(
+            "❌ ما قدرتش أجيب رابط الجروب.\n"
+            "تأكد إن البوت أدمن وعنده صلاحية "
+            "«دعوة المستخدمين عبر رابط» (Invite Users via Link)."
+        )
 
 # ─────────────────────────────────────────────
 #  إرسال رابط المواجهة
@@ -350,6 +402,11 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         is_creator = False
         is_ref     = False
+
+    # ══════ 0.0 أمر الرابط (يعمل دايماً بغض النظر عن حالة المواجهة) ══════
+    if msg_cl.strip() in LINK_TRIGGERS:
+        await cmd_group_link(update, context)
+        return
 
     w = wars.get(cid)
 
@@ -598,6 +655,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("setimage", cmd_setimage))
     app.add_handler(CommandHandler("images",   cmd_images))
+    app.add_handler(CommandHandler("link",     cmd_group_link))
     # ← مهم: قبل TEXT handler
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
