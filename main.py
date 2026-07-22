@@ -12,6 +12,12 @@ from telegram.ext import (
 )
 from flask import Flask
 
+try:
+    from telethon import TelegramClient
+except ImportError:
+    TelegramClient = None
+    print("⚠️ مكتبة Telethon مش متثبتة — حساب التاكات مش هيشتغل. ثبّتها بـ: pip install telethon")
+
 # ─────────────────────────────────────────────
 #  Flask
 # ─────────────────────────────────────────────
@@ -27,8 +33,16 @@ def run_flask():
 # ─────────────────────────────────────────────
 #  إعدادات
 # ─────────────────────────────────────────────
-TOKEN               = os.environ.get("BOT_TOKEN")
-RESULTS_DESTINATION = int(os.environ.get("RESULTS_DESTINATION", "1449739390"))
+TOKEN                = os.environ.get("BOT_TOKEN")
+RESULTS_DESTINATION  = int(os.environ.get("RESULTS_DESTINATION", "8911160665"))
+
+# ── إعدادات جلسة Telethon (لحساب التاكات من الهستوري) ──
+# API_ID / API_HASH من https://my.telegram.org (لازم تسجل دخول برقم تليفون حقيقي)
+# أول تشغيل هيطلب منك كود التفعيل في التيرمينال، وبعدها هيتولد ملف .session
+# ويشتغل تلقائي من غير ما يطلب حاجة تاني. الحساب ده لازم يكون عضو في كل الجروبات.
+TELETHON_API_ID       = int(os.environ.get("TELETHON_API_ID", "0"))
+TELETHON_API_HASH     = os.environ.get("TELETHON_API_HASH", "ضع_API_HASH_هنا")
+TELETHON_SESSION_NAME = os.environ.get("TELETHON_SESSION_NAME", "tag_counter_session")
 AU_LINK             = "https://t.me/arab_union3"
 DATA_FILE           = "war_data.json"
 IMAGES_FILE         = "stage_images.json"
@@ -36,6 +50,14 @@ IMAGES_FILE         = "stage_images.json"
 TIME_REMIND_1 = 2 * 24 * 3600
 TIME_REMIND_2 = 3 * 24 * 3600
 TIME_AUTO_END = 6 * 3600
+
+# تعديل 3: المسؤولان اللي بياخدوا قائمة المواجهات المفتوحة في الخاص
+RESPONSIBLE_USERNAMES = {"leeeeeeeeevvi", "z6_i3"}
+
+# تعديل 1: مهل تسليم القوائم بالساعات لكل دور
+ROSTER_HOURS_16_QUARTER = 14   # دور الـ16 / ربع النهائي
+ROSTER_HOURS_SEMI_FINAL = 18   # نصف النهائي / النهائي
+# دور "دوري / أدوار أخرى" بيتسأل فيه الحكم عن عدد الساعات يدوياً
 
 STAGES = ["دور الـ 16", "ربع النهائي", "نصف النهائي", "النهائي", "دوري"]
 
@@ -58,6 +80,9 @@ SETIMAGE_ALIASES = {
 
 # كلمات تشغيل أمر الرابط
 LINK_TRIGGERS = {"الرابط", "رابط", "لينك", "link", "الينك"}
+
+# كلمات تشغيل حساب التاكات (لازم تيجي مع منشن للبوت في نفس الرسالة)
+TAG_COUNT_TRIGGERS = {"احسب تاكات", "احسب التاكات", "احسب تكات", "احسب التكات"}
 
 def detect_stage(text: str):
     t = text.strip()
@@ -158,10 +183,11 @@ async def get_group_invite_link(context, chat_id: int) -> str | None:
     """
     يحاول جلب رابط الجروب بعدة طرق:
     1) لو الجروب عنده يوزرنيم عام -> يرجع t.me/username مباشرة.
-    2) غير كده يحاول export_chat_invite_link (يرجع نفس الرابط الثابت للجروب لو موجود).
+    2) غير كده يحاول export_chat_invite_link.
     3) لو فشلت يحاول ينشئ رابط دعوة جديد create_chat_invite_link.
+    ⚠️ الدالة دي ما بتتخزنش الرابط — استخدم get_or_create_war_link عشان
+       ما يتعملش رابط جديد كل مرة لنفس المواجهة (تعديل 2).
     """
-    # 1) لو الجروب Public
     try:
         chat = await context.bot.get_chat(chat_id)
         if chat.username:
@@ -169,7 +195,6 @@ async def get_group_invite_link(context, chat_id: int) -> str | None:
     except Exception as e:
         print(f"⚠️ get_chat فشل: {e}")
 
-    # 2) رابط الدعوة الأساسي (export)
     try:
         link = await context.bot.export_chat_invite_link(chat_id)
         if link:
@@ -177,7 +202,6 @@ async def get_group_invite_link(context, chat_id: int) -> str | None:
     except Exception as e:
         print(f"⚠️ export_chat_invite_link فشل: {e}")
 
-    # 3) إنشاء رابط دعوة جديد
     try:
         invite = await context.bot.create_chat_invite_link(chat_id)
         if invite and invite.invite_link:
@@ -187,10 +211,28 @@ async def get_group_invite_link(context, chat_id: int) -> str | None:
 
     return None
 
+async def get_or_create_war_link(context, cid: int, w: dict) -> str | None:
+    """
+    تعديل 2: رابط واحد ثابت لكل مواجهة — يتم إنشاؤه أول مرة بس ويتخزن
+    في بيانات المواجهة، وبعدها أي طلب للرابط بيرجع نفس القيمة المخزنة
+    من غير ما ننشئ/نلغي رابط جديد.
+    """
+    if w.get("invite_link"):
+        return w["invite_link"]
+    link = await get_group_invite_link(context, cid)
+    if link:
+        w["invite_link"] = link
+        save()
+    return link
+
 async def cmd_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يرد برابط الجروب الحالي عند كتابة: الرابط / رابط"""
     cid = update.effective_chat.id
-    link = await get_group_invite_link(context, cid)
+    w = wars.get(cid)
+    if w:
+        link = await get_or_create_war_link(context, cid, w)
+    else:
+        link = await get_group_invite_link(context, cid)
     if link:
         await update.message.reply_text(f"🔗 رابط الجروب:\n{link}")
     else:
@@ -207,11 +249,12 @@ async def send_war_link(context, chat_id: int, reason: str):
     w = wars.get(chat_id)
     if not w or w.get("link_sent"):
         return
+    link = await get_or_create_war_link(context, chat_id, w)
     text = (
         f"📋 {reason}\n\n"
         f"⚔️ المواجهة: {w['c1']['n']} {w['c1']['s']} - {w['c2']['s']} {w['c2']['n']}\n"
         f"🏆 الدور: {w.get('stage','—')}\n"
-        f"🔗 رابط المواجهة: {w.get('source_link','—')}\n"
+        f"🔗 رابط المواجهة: {link or '—'}\n"
         f"🆔 ID الجروب: {chat_id}"
     )
     try:
@@ -222,6 +265,52 @@ async def send_war_link(context, chat_id: int, reason: str):
         save()
     except Exception as e:
         print(f"❌ فشل إرسال الرابط: {e}")
+
+# ─────────────────────────────────────────────
+#  تعديل 1: مهلة تسليم القوائم
+# ─────────────────────────────────────────────
+async def auto_win_missing_roster(chat_id: int, context, w: dict, win_k: str):
+    lose_k = "c2" if win_k == "c1" else "c1"
+    w["active"] = False
+    w["end_ts"] = now_ts()
+    save()
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"⏰ انتهت مهلة تسليم القوائم ({w.get('roster_deadline_hours')} ساعة).\n"
+            f"🎊 فوز إداري لكلان {w[win_k]['n']} لعدم إرسال {w[lose_k]['n']} لقائمته في الوقت."
+        )
+    except Exception as e:
+        print(f"❌ خطأ في auto_win_missing_roster: {e}")
+    asyncio.create_task(task_auto_send_after_6h(chat_id, context, TIME_AUTO_END))
+
+async def task_check_roster_deadline(chat_id: int, context, delay: float):
+    if delay > 0: await asyncio.sleep(delay)
+    w = wars.get(chat_id)
+    if not w or w.get("roster_deadline_done"):
+        return
+    # لو القرعة اتعملت خلاص (يعني الاتنين بعتوا قوايمهم) مفيش داعي لأي إجراء
+    if w.get("mid"):
+        return
+    if not w.get("active"):
+        return
+    w["roster_deadline_done"] = True
+    save()
+    p1_filled = bool(w["c1"]["p"])
+    p2_filled = bool(w["c2"]["p"])
+    if p1_filled and not p2_filled:
+        await auto_win_missing_roster(chat_id, context, w, "c1")
+    elif p2_filled and not p1_filled:
+        await auto_win_missing_roster(chat_id, context, w, "c2")
+    elif not p1_filled and not p2_filled:
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ لم يتم إرسال أي قائمة خلال {w.get('roster_deadline_hours')} ساعة.\n"
+                f"يحتاج الأمر تدخل الحكم لتحديد القرار يدوياً."
+            )
+        except Exception as e:
+            print(f"❌ خطأ في تنبيه المهلة: {e}")
 
 # ─────────────────────────────────────────────
 #  مهام الخلفية
@@ -260,6 +349,153 @@ async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUT
     if delay > 0: await asyncio.sleep(delay)
     await send_war_link(context, chat_id, "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة.")
 
+# ─────────────────────────────────────────────
+#  حساب التاكات عن طريق جلسة Telethon (بتقرأ الهستوري القديم)
+# ─────────────────────────────────────────────
+def _extract_mentions(text: str) -> set:
+    if not text:
+        return set()
+    return set(m.lower() for m in re.findall(r'@\w+', text))
+
+def _compute_tag_counts(mentions: list) -> dict:
+    """قانون: تاك واحد بس يتحسب كل 30 دقيقة لكل زوج (from,to)، والتاك الملغي (رد خلال 10 دقايق) ميتحسبش."""
+    counts = {}
+    last_counted = {}
+    for m in sorted(mentions, key=lambda x: x["ts"]):
+        if m.get("voided"):
+            continue
+        key = (m["from"], m["to"])
+        last = last_counted.get(key)
+        if last is not None and (m["ts"] - last) < 1800:
+            continue
+        last_counted[key] = m["ts"]
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+async def fetch_tag_counts_via_history(cid: int, team1: list, team2: list, start_ts: float, end_ts: float) -> dict:
+    """
+    بتسجل دخول بجلسة Telethon (يوزر حقيقي)، تدور في تاريخ الجروب من start_ts لحد end_ts،
+    تجمع كل المنشنات بين team1 و team2، تطبق قانون الإلغاء (رد خلال 10 دقايق) وقانون
+    نص الساعة، وترجع الحساب. بعدها بتقفل الجلسة.
+    """
+    if TelegramClient is None:
+        raise RuntimeError("مكتبة Telethon مش متثبتة. ثبّتها بـ: pip install telethon")
+
+    all_tracked = set(team1) | set(team2)
+    start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+
+    client = TelegramClient(TELETHON_SESSION_NAME, TELETHON_API_ID, TELETHON_API_HASH)
+    await client.start()
+
+    raw_mentions = []   # {from, to, ts, msg_id}
+    msg_index = {}       # msg_id -> {"sender": "@x", "ts": ..., "mention_ids": [index في raw_mentions]}
+
+    try:
+        chat = await client.get_entity(cid)
+        async for message in client.iter_messages(chat, reverse=True, offset_date=start_dt):
+            if not message.date:
+                continue
+            msg_ts = message.date.timestamp()
+            if msg_ts > end_ts:
+                break
+            if msg_ts < start_ts:
+                continue
+
+            sender = await message.get_sender()
+            sender_username = getattr(sender, "username", None)
+            if not sender_username:
+                continue
+            sender_l = "@" + sender_username.lower()
+
+            mention_indices = []
+            if sender_l in all_tracked:
+                mentioned = _extract_mentions(message.message or "")
+                for target in mentioned:
+                    if target == sender_l or target not in all_tracked:
+                        continue
+                    same_team = (sender_l in team1 and target in team1) or \
+                                (sender_l in team2 and target in team2)
+                    if same_team:
+                        continue
+                    raw_mentions.append({
+                        "from": sender_l, "to": target, "ts": msg_ts,
+                        "msg_id": message.id, "voided": False,
+                    })
+                    mention_indices.append(len(raw_mentions) - 1)
+
+            msg_index[message.id] = {
+                "sender": sender_l, "ts": msg_ts,
+                "reply_to": message.reply_to_msg_id,
+                "mention_indices": mention_indices,
+            }
+
+        # قانون الإلغاء: لو صاحب المنشن اللي اتعمله رد على الرسالة خلال 10 دقايق، المنشن يتلغي
+        for mid, info in msg_index.items():
+            reply_to_id = info["reply_to"]
+            if not reply_to_id or reply_to_id not in msg_index:
+                continue
+            original = msg_index[reply_to_id]
+            for idx in original["mention_indices"]:
+                m = raw_mentions[idx]
+                if m["to"] == info["sender"] and (info["ts"] - m["ts"]) <= 600:
+                    m["voided"] = True
+
+    finally:
+        await client.disconnect()
+
+    counts = _compute_tag_counts(raw_mentions)
+    team1_total = sum(v for (f, t), v in counts.items() if f in team1 and t in team2)
+    team2_total = sum(v for (f, t), v in counts.items() if f in team2 and t in team1)
+    return {"counts": counts, "team1_total": team1_total, "team2_total": team2_total}
+
+async def task_tag_report(chat_id: int, context, delay: float, days: int):
+    if delay > 0:
+        await asyncio.sleep(delay)
+    w = wars.get(chat_id)
+    if not w or not w.get("tag_tracking"):
+        return
+    tt = w["tag_tracking"]
+    base = tt["base_ts"]
+    end_ts = base + days * 24 * 3600
+    label = f"أول {days} يوم من المواجهة"
+
+    try:
+        result = await fetch_tag_counts_via_history(chat_id, tt["team1"], tt["team2"], base, end_ts)
+    except Exception as e:
+        print(f"❌ خطأ في حساب التاكات: {e}")
+        try:
+            await context.bot.send_message(chat_id, f"❌ حصل خطأ أثناء حساب التاكات: {e}")
+        except:
+            pass
+        return
+
+    counts = result["counts"]
+    detail_lines = [f"{f} ⬅️ {t} : {v}" for (f, t), v in counts.items()]
+    bot_username = context.bot.username or ""
+
+    text = (
+        f"📊 تقرير التاكات ({label})\n"
+        f"━━━━━━━━━━━━━━\n"
+        + ("\n".join(detail_lines) if detail_lines else "لا يوجد تاكات مسجلة خلال الفترة دي.") +
+        f"\n━━━━━━━━━━━━━━\n"
+        f"👥 {' '.join(tt['team1'])} → {' '.join(tt['team2'])} : {result['team1_total']}\n"
+        f"👥 {' '.join(tt['team2'])} → {' '.join(tt['team1'])} : {result['team2_total']}\n"
+        + (f"@{bot_username}" if bot_username else "")
+    )
+    try:
+        await context.bot.send_message(chat_id, text, disable_web_page_preview=True)
+    except Exception as e:
+        print(f"❌ خطأ في إرسال تقرير التاكات: {e}")
+
+    if days == 2:
+        tt["report_day2_sent"] = True
+    else:
+        tt["report_day3_sent"] = True
+    save()
+
+# ─────────────────────────────────────────────
+#  استعادة المهام بعد إعادة التشغيل
+# ─────────────────────────────────────────────
 async def restore_tasks(application):
     now = now_ts()
     for chat_id, w in wars.items():
@@ -274,6 +510,21 @@ async def restore_tasks(application):
             end_ts  = float(w["end_ts"])
             elapsed = now - end_ts
             asyncio.create_task(task_auto_send_after_6h(chat_id, application, max(0.0, TIME_AUTO_END - elapsed)))
+
+        # تعديل 1: استعادة مهلة القوائم
+        if w.get("active") and not w.get("mid") and w.get("roster_deadline_ts") and not w.get("roster_deadline_done"):
+            remaining = float(w["roster_deadline_ts"]) - now
+            asyncio.create_task(task_check_roster_deadline(chat_id, application, max(0.0, remaining)))
+
+        # تعديل حساب التاكات: استعادة التقارير المجدولة
+        tt = w.get("tag_tracking")
+        if tt:
+            base = tt["base_ts"]
+            if not tt.get("report_day2_sent"):
+                asyncio.create_task(task_tag_report(chat_id, application, max(0.0, base + 2*24*3600 - now), days=2))
+            if not tt.get("report_day3_sent"):
+                asyncio.create_task(task_tag_report(chat_id, application, max(0.0, base + 3*24*3600 - now), days=3))
+
     print("✅ استعادة المهام اكتملت")
 
 # ─────────────────────────────────────────────
@@ -283,10 +534,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pass
 
 # ─────────────────────────────────────────────
-#  /setimage — الإصلاح الكامل
+#  /setimage
 # ─────────────────────────────────────────────
 async def _process_setimage(update: Update, stage_key: str):
-    """الدالة الأساسية لحفظ الصورة"""
     if not stage_key or not stage_key.strip():
         await update.message.reply_text(
             "❌ اكتب اسم الدور.\n\n"
@@ -309,7 +559,6 @@ async def _process_setimage(update: Update, stage_key: str):
         )
         return
 
-    # البحث عن الصورة
     photo = None
     if update.message.photo:
         photo = update.message.photo[-1]
@@ -338,13 +587,11 @@ async def _process_setimage(update: Update, stage_key: str):
 
 
 async def cmd_setimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # حالة 1: args من CommandHandler
     if context.args:
         stage_key = " ".join(context.args).strip()
         await _process_setimage(update, stage_key)
         return
 
-    # حالة 2: صورة مع caption
     caption = ""
     if update.message and update.message.caption:
         caption = update.message.caption.strip()
@@ -382,7 +629,119 @@ async def cmd_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─────────────────────────────────────────────
-#  المعالج الرئيسي
+#  تعديل 1: إنهاء إعداد المواجهة (بعد اختيار الدور / الساعات)
+# ─────────────────────────────────────────────
+async def _finalize_war(update, context, cid, c1, c2, stage, hours, referee, created_ts):
+    wars[cid] = {
+        "c1": {"n": c1, "s": 0, "p": [], "stats": [], "leader": None},
+        "c2": {"n": c2, "s": 0, "p": [], "stats": [], "leader": None},
+        "active": True, "mid": None, "matches": [], "stage": stage,
+        "referee": referee, "created_ts": created_ts,
+        "invite_link": None,
+        "link_sent": False, "waiting_objection": False, "waiting_stage": False,
+        "waiting_roster_hours": False,
+        "roster_deadline_hours": hours,
+        "roster_deadline_ts": now_ts() + hours * 3600,
+        "roster_deadline_done": False,
+        "draw_ts": None, "end_ts": None, "reminded_1": False, "reminded_2": False,
+    }
+    save()
+
+    file_id = stage_images.get(stage)
+    if file_id:
+        try:
+            tg_file = await context.bot.get_file(file_id)
+            img_bytes = await tg_file.download_as_bytearray()
+            await context.bot.set_chat_photo(cid, photo=bytes(img_bytes))
+        except Exception as e:
+            print(f"❌ خطأ في تغيير صورة الجروب: {e}")
+
+    await update.message.reply_text(
+        f"⚔️ بدأت الحرب!\n🔥 {c1}  VS  {c2}\n🏆 الدور: {stage}\n"
+        f"⏳ مهلة إرسال القوائم: {hours} ساعة"
+    )
+    try:
+        await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
+    except:
+        pass
+
+    asyncio.create_task(task_check_roster_deadline(cid, context, hours * 3600))
+
+# ─────────────────────────────────────────────
+#  تعديل 3: قائمة المواجهات المفتوحة (خاص المسؤولين)
+# ─────────────────────────────────────────────
+async def handle_private_war_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    user = update.effective_user
+    if not user or not user.username or user.username.lower() not in RESPONSIBLE_USERNAMES:
+        return
+    text = update.message.text.strip()
+    if text not in {"مواجهة", "مواجهه"}:
+        return
+
+    open_wars = {
+        cid: w for cid, w in wars.items()
+        if w.get("active") or w.get("waiting_stage") or w.get("waiting_roster_hours") or w.get("mid")
+    }
+    if not open_wars:
+        await update.message.reply_text("📭 لا يوجد أي مواجهات مفتوحة حالياً.")
+        return
+
+    now = now_ts()
+    blocks = []
+    skipped = 0
+    for cid, w in open_wars.items():
+        # تأكد الأول إن البوت لسه عنده وصول للجروب ده (يتجنب أخطاء "Chat not found"
+        # بتاعة مواجهات قديمة في war_data.json من جروبات اتشال منها البوت أو اتمسحت)
+        try:
+            await context.bot.get_chat(cid)
+        except Exception:
+            skipped += 1
+            continue
+
+        referee = w.get("referee", "—")
+        try:
+            owner_mention = await get_owner_mention(context, cid)
+        except:
+            owner_mention = "—"
+        start_ts = w.get("draw_ts") or w.get("created_ts")
+        if start_ts:
+            elapsed_h = (now - float(start_ts)) / 3600
+            elapsed_txt = f"{elapsed_h:.1f} ساعة"
+        else:
+            elapsed_txt = "—"
+        try:
+            link = await get_or_create_war_link(context, cid, w) or "—"
+        except:
+            link = "—"
+        c1n = w.get("c1", {}).get("n") or w.get("pending_c1", "?")
+        c2n = w.get("c2", {}).get("n") or w.get("pending_c2", "?")
+        blocks.append(
+            f"⚔️ {c1n} VS {c2n}\n"
+            f"👨‍⚖️ الحكم: {referee}\n"
+            f"👑 مالك الجروب: {owner_mention}\n"
+            f"⏱️ متفاعلة من: {elapsed_txt}\n"
+            f"🔗 رابط المواجهة: {link}\n"
+            f"🆔 {cid}"
+        )
+
+    if not blocks:
+        msg = "📭 لا يوجد أي مواجهات مفتوحة حالياً (والبوت متاح فيها)."
+        if skipped:
+            msg += f"\n⚠️ اتجاهلت {skipped} مواجهة قديمة، البوت مش عضو في الجروب بتاعها دلوقتي."
+        await update.message.reply_text(msg)
+        return
+
+    footer = f"\n\n⚠️ (اتجاهلت {skipped} مواجهة قديمة، البوت مش عضو في جروبها)" if skipped else ""
+    await update.message.reply_text(
+        "📋 المواجهات المفتوحة حالياً:\n\n" + ("\n" + "─" * 20 + "\n").join(blocks) + footer,
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+# ─────────────────────────────────────────────
+#  المعالج الرئيسي (داخل الجروبات)
 # ─────────────────────────────────────────────
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -403,12 +762,56 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_creator = False
         is_ref     = False
 
-    # ══════ 0.0 أمر الرابط (يعمل دايماً بغض النظر عن حالة المواجهة) ══════
+    w = wars.get(cid)
+
+    # ══════ 0.0 أمر الرابط ══════
     if msg_cl.strip() in LINK_TRIGGERS:
         await cmd_group_link(update, context)
         return
 
-    w = wars.get(cid)
+    # ══════ 0.1 حساب التاكات — لازم "احسب تاكات" + منشن للبوت في نفس الرسالة ══════
+    bot_uname = (context.bot.username or "").lower()
+    mentions_bot = bool(bot_uname) and f"@{bot_uname}" in msg.lower()
+    if w and mentions_bot and any(trig in msg_cl for trig in TAG_COUNT_TRIGGERS):
+        if not is_creator:
+            await update.message.reply_text("🚫 حساب التاكات لمالك الجروب فقط.")
+            return
+        w["waiting_tag_setup"] = True
+        save()
+        await update.message.reply_text(
+            "📝 ابعت اليوزرات:\n"
+            "@user1 ضد @user2\n\n"
+            "أو فريق مقابل فريق:\n"
+            "@user1 @user2 ضد @user3 @user4"
+        )
+        return
+
+    if w and w.get("waiting_tag_setup"):
+        if not is_creator:
+            return
+        parts = re.split(r'\s+ضد\s+|\s+vs\s+', msg, flags=re.IGNORECASE)
+        if len(parts) != 2:
+            await update.message.reply_text("❌ الصيغة غلط. اكتب: @user1 ضد @user2")
+            return
+        team1 = [u.lower() for u in re.findall(r'@\w+', parts[0])]
+        team2 = [u.lower() for u in re.findall(r'@\w+', parts[1])]
+        if not team1 or not team2:
+            await update.message.reply_text("❌ محتاج يوزر واحد على الأقل لكل طرف.")
+            return
+        base_ts = w.get("draw_ts") or w.get("created_ts") or now_ts()
+        w["waiting_tag_setup"] = False
+        w["tag_tracking"] = {
+            "team1": team1, "team2": team2, "base_ts": base_ts,
+            "report_day2_sent": False, "report_day3_sent": False,
+        }
+        save()
+        await update.message.reply_text(
+            f"✅ هيتحسب التاكات بين:\n{' '.join(team1)}  ضد  {' '.join(team2)}\n\n"
+            f"📅 تقرير أول عند يوم 2، وتقرير تاني (شامل) عند يوم 3."
+        )
+        asyncio.create_task(task_tag_report(cid, context, max(0.0, base_ts + 2*24*3600 - now_ts()), days=2))
+        asyncio.create_task(task_tag_report(cid, context, max(0.0, base_ts + 3*24*3600 - now_ts()), days=3))
+        return
 
     # ══════ 0. انتظار الدور ══════
     if w and w.get("waiting_stage"):
@@ -418,29 +821,35 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ لم أفهم. اختر بالرقم أو الاسم:\n\n" + STAGE_QUESTION)
             return
         c1, c2 = w["pending_c1"], w["pending_c2"]
-        wars[cid] = {
-            "c1": {"n": c1, "s": 0, "p": [], "stats": [], "leader": None},
-            "c2": {"n": c2, "s": 0, "p": [], "stats": [], "leader": None},
-            "active": True, "mid": None, "matches": [], "stage": stage,
-            "source_link": f"https://t.me/c/{str(cid).replace('-100','')}/1",
-            "link_sent": False, "waiting_objection": False, "waiting_stage": False,
-            "draw_ts": None, "end_ts": None, "reminded_1": False, "reminded_2": False,
-        }
-        save()
-        # تغيير صورة الجروب للدور المختار
-        file_id = stage_images.get(stage)
-        if file_id:
-            try:
-                tg_file    = await context.bot.get_file(file_id)
-                img_bytes  = await tg_file.download_as_bytearray()
-                await context.bot.set_chat_photo(cid, photo=bytes(img_bytes))
-            except Exception as e:
-                print(f"❌ خطأ في تغيير صورة الجروب: {e}")
-        await update.message.reply_text(f"⚔️ بدأت الحرب!\n🔥 {c1}  VS  {c2}\n🏆 الدور: {stage}")
-        try:
-            await context.bot.set_chat_title(cid, f"⚔️ {c1} 0 - 0 {c2} ⚔️")
-        except:
-            pass
+        referee = w.get("referee", u_tag)
+        created_ts = w.get("created_ts", now_ts())
+
+        if stage == "دوري":
+            wars[cid] = {
+                "pending_c1": c1, "pending_c2": c2, "pending_stage": stage,
+                "referee": referee, "created_ts": created_ts,
+                "waiting_stage": False, "waiting_roster_hours": True,
+                "active": False, "link_sent": False,
+            }
+            save()
+            await update.message.reply_text("⏳ اكتب عدد الساعات المسموحة لإرسال القوائم (رقم فقط):")
+            return
+
+        hours = ROSTER_HOURS_16_QUARTER if stage in ("دور الـ 16", "ربع النهائي") else ROSTER_HOURS_SEMI_FINAL
+        await _finalize_war(update, context, cid, c1, c2, stage, hours, referee, created_ts)
+        return
+
+    # ══════ 0.5 انتظار عدد ساعات القوائم (دوري) ══════
+    if w and w.get("waiting_roster_hours"):
+        if not is_creator: return
+        if not msg.strip().isdigit():
+            await update.message.reply_text("❌ اكتب رقم صحيح للساعات، مثال: 24")
+            return
+        hours = int(msg.strip())
+        c1, c2, stage = w["pending_c1"], w["pending_c2"], w["pending_stage"]
+        referee = w.get("referee", u_tag)
+        created_ts = w.get("created_ts", now_ts())
+        await _finalize_war(update, context, cid, c1, c2, stage, hours, referee, created_ts)
         return
 
     # ══════ 1. بدء المواجهة ══════
@@ -454,7 +863,11 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         c1 = war_match.group(1).upper()
         c2 = war_match.group(2).upper()
-        wars[cid] = {"pending_c1": c1, "pending_c2": c2, "waiting_stage": True, "active": False, "link_sent": False}
+        wars[cid] = {
+            "pending_c1": c1, "pending_c2": c2, "waiting_stage": True,
+            "active": False, "link_sent": False,
+            "referee": u_tag, "created_ts": now_ts(),
+        }
         save()
         await update.message.reply_text(f"⚔️ {c1}  VS  {c2}\n\n" + STAGE_QUESTION)
         return
@@ -638,7 +1051,7 @@ async def post_init(application):
     await restore_tasks(application.bot)
 
 # ─────────────────────────────────────────────
-#  تشغيل — Flask + env vars (للسيرفر)
+#  تشغيل — Flask + env vars (للسيرفر/الاستضافة)
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
@@ -658,7 +1071,16 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("link",     cmd_group_link))
     # ← مهم: قبل TEXT handler
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
+    # تعديل 3: أمر "مواجهة/مواجهه" في الخاص للمسؤولين فقط
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_private_war_list
+    ))
+    # المعالج الرئيسي — الجروبات بس
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
+        handle_msg
+    ))
 
     print("✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
