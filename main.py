@@ -3108,5 +3108,5 @@ if __name__ == "__main__":
     ))
 
     print("✅ البوت يعمل...")
-    print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
+    print(f"..... 📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
     app.run_polling(drop_pending_updates=True)
