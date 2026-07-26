@@ -14,19 +14,6 @@ from telegram.ext import (
 from flask import Flask
 
 try:
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    from telethon.tl.functions.messages import ImportChatInviteRequest
-    from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
-    from telethon.errors import (
-        UserAlreadyParticipantError, InviteHashExpiredError,
-        InviteHashInvalidError, FloodWaitError,
-    )
-except ImportError:
-    TelegramClient = None
-    print("⚠️ مكتبة Telethon مش متثبتة — حساب التاكات مش هيشتغل. ثبّتها بـ: pip install telethon")
-
-try:
     import httpx
 except ImportError:
     httpx = None
@@ -50,13 +37,6 @@ def run_flask():
 TOKEN                = os.environ.get("BOT_TOKEN")
 RESULTS_DESTINATION  = 8911160665  # آيدي الشخص/الجروب اللي هيوصله رابط المواجهة
 
-# ── إعدادات جلسة Telethon (لحساب التاكات من الهستوري) ──
-# API_ID / API_HASH من https://my.telegram.org — مش سرية فمتحطوطين هنا مباشرة (مش env vars).
-# TELETHON_SESSION_STRING فضلت env var لأنها فعليًا تسجيل دخول جاهز لحساب حقيقي — دي
-# الحاجة الحساسة الوحيدة هنا (لو حد شافها يقدر يدخل بالحساب مباشرة من غير باسورد).
-TELETHON_API_ID         = 0  # ← حط الـ API_ID بتاعك هنا (رقم)
-TELETHON_API_HASH       = "ضع_API_HASH_هنا"
-TELETHON_SESSION_STRING = os.environ.get("TELETHON_SESSION_STRING", "")
 AU_LINK             = "https://t.me/arab_union3"
 DATA_FILE           = "war_data.json"
 IMAGES_FILE         = "stage_images.json"
@@ -97,26 +77,6 @@ TIME_AUTO_END = 6 * 3600
 # تعديل 3: المسؤولان اللي بياخدوا قائمة المواجهات المفتوحة في الخاص
 RESPONSIBLE_USERNAMES = {"leeeeeeeeevvi", "z6_i3"}
 
-def is_tag_admin(user, is_creator: bool) -> bool:
-    """مسموح بحساب التاكات لمالك الجروب الحقيقي، أو لأي حد من المسؤولين
-    (RESPONSIBLE_USERNAMES) حتى لو مش هو مالك الجروب."""
-    if is_creator:
-        return True
-    if user and user.username and user.username.lower() in RESPONSIBLE_USERNAMES:
-        return True
-    return False
-
-# ── الوقت الغير رسمي: أي تاك بيتبعت في الفترة دي (بتوقيت القاهرة) ميتحسبش خالص ──
-# عدّل LOCAL_TZ_OFFSET_HOURS لو التوقيت المستخدم مختلف عن توقيت القاهرة (UTC+2).
-LOCAL_TZ_OFFSET_HOURS = 2
-OFF_HOURS_START = 2   # 2 بعد منتصف الليل
-OFF_HOURS_END   = 9   # 9 الصبح
-
-def _is_off_hours(msg_dt) -> bool:
-    """بيتحقق هل وقت الرسالة (بعد تحويله لتوقيت القاهرة) واقع في الفترة الغير رسمية."""
-    local_dt = msg_dt + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
-    return OFF_HOURS_START <= local_dt.hour < OFF_HOURS_END
-
 # تعديل 1: مهل تسليم القوائم بالساعات لكل دور
 ROSTER_HOURS_16_QUARTER = 14   # دور الـ16 / ربع النهائي
 ROSTER_HOURS_SEMI_FINAL = 18   # نصف النهائي / النهائي
@@ -154,9 +114,6 @@ SETIMAGE_ALIASES = {
 
 # كلمات تشغيل أمر الرابط
 LINK_TRIGGERS = {"الرابط", "رابط", "لينك", "link", "الينك"}
-
-# كلمات تشغيل حساب التاكات (لازم تيجي مع منشن للبوت في نفس الرسالة)
-TAG_COUNT_TRIGGERS = {"احسب تاكات", "احسب التاكات", "احسب تكات", "احسب التكات"}
 
 # كلمات تشغيل أمر عرض كل الجروبات المسجلة (خاص المسؤولين فقط)
 GROUPS_LIST_TRIGGERS = {"الجروبات", "كل الجروبات", "جروبات"}
@@ -1902,8 +1859,6 @@ async def ask_ai_general(question: str, asker: str, w: dict | None) -> str:
 #  البيانات
 # ─────────────────────────────────────────────
 wars = {}
-# حالة انتظار اليوزرات لحساب التاكات — منفصلة عن wars عشان تشتغل حتى لو مفيش مواجهة نشطة في الجروب
-pending_tag_setup = {}
 
 def save():
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -2204,284 +2159,6 @@ async def task_remind_2(chat_id: int, context, delay: float):
 async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUTO_END):
     if delay > 0: await asyncio.sleep(delay)
     await send_war_link(context, chat_id, "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة.")
-
-# ─────────────────────────────────────────────
-#  حساب التاكات عن طريق جلسة Telethon (بتقرأ الهستوري القديم)
-# ─────────────────────────────────────────────
-def _extract_mentions(text: str) -> set:
-    if not text:
-        return set()
-    return set(m.lower() for m in re.findall(r'@\w+', text))
-
-def _msg_link(chat, msg_id) -> str:
-    """بيبني رابط مباشر للرسالة — يوزرنيم الجروب لو عام، أو رابط t.me/c/ لو خاص."""
-    username = getattr(chat, "username", None)
-    if username:
-        return f"https://t.me/{username}/{msg_id}"
-    cid = getattr(chat, "id", None)
-    if cid:
-        return f"https://t.me/c/{cid}/{msg_id}"
-    return ""
-
-def _compute_tag_counts(mentions: list) -> dict:
-    """قانون: تاك واحد بس يتحسب كل 30 دقيقة لكل زوج (from,to)، والتاك الملغي (رد خلال 10 دقايق) ميتحسبش.
-    بترجع dict: (from,to) -> {"count": عدد, "links": [روابط الرسايل اللي اتحسبت فعلاً]}."""
-    result = {}
-    last_counted = {}
-    for m in sorted(mentions, key=lambda x: x["ts"]):
-        if m.get("voided"):
-            continue
-        key = (m["from"], m["to"])
-        last = last_counted.get(key)
-        if last is not None and (m["ts"] - last) < 1800:
-            continue
-        last_counted[key] = m["ts"]
-        entry = result.setdefault(key, {"count": 0, "links": []})
-        entry["count"] += 1
-        if m.get("link"):
-            entry["links"].append(m["link"])
-    return result
-
-def _collect_voided_tags(mentions: list) -> dict:
-    """بيجمع كل التاكات اللي اتلغت (رابط الرسالة + سبب الإلغاء) لكل زوج (from,to)."""
-    result = {}
-    for m in sorted(mentions, key=lambda x: x["ts"]):
-        if not m.get("voided"):
-            continue
-        key = (m["from"], m["to"])
-        result.setdefault(key, []).append({
-            "link": m.get("link") or "",
-            "reason": m.get("void_reason") or "غير معروف",
-        })
-    return result
-
-async def _join_group_via_link(client, invite_link: str):
-    """يخلي حساب Telethon يدخل الجروب عن طريق رابط دعوة جابه البوت."""
-    invite_link = (invite_link or "").strip()
-    if not invite_link:
-        raise RuntimeError("مقدرش أجيب رابط دعوة من البوت (لازم يكون أدمن بصلاحية دعوة أعضاء).")
-    try:
-        if "joinchat/" in invite_link:
-            invite_hash = invite_link.split("joinchat/")[-1]
-            await client(ImportChatInviteRequest(invite_hash))
-        elif "/+" in invite_link:
-            invite_hash = invite_link.split("/+")[-1]
-            await client(ImportChatInviteRequest(invite_hash))
-        else:
-            username = invite_link.rstrip("/").split("/")[-1]
-            await client(JoinChannelRequest(username))
-    except UserAlreadyParticipantError:
-        pass  # الحساب عضو بالفعل، عادي
-    except FloodWaitError as e:
-        raise RuntimeError(f"تليجرام طلب الانتظار {e.seconds} ثانية قبل محاولة الدخول تاني.")
-    except (InviteHashExpiredError, InviteHashInvalidError) as e:
-        raise RuntimeError(f"رابط الدعوة غير صالح/منتهي: {e}")
-
-
-async def _count_tags_for_range(client, chat, team1: list, team2: list, start_ts: float, end_ts: float) -> dict:
-    """
-    تدور في تاريخ الجروب **كله** من الأحدث للأقدم (الترتيب الطبيعي في تيليجرام)،
-    تتخطى بس الرسايل اللي وقتها بعد end_ts، وتفحص كل حاجة تانية لحد آخر
-    رسالة في الجروب — عشان تلقط كل تاكات اللاعبين المتابَعين حتى لو كانت
-    قبل بداية المواجهة. تجمع كل المنشنات بين team1 و team2، تطبق قانون
-    الإلغاء (رد خلال 10 دقايق)، وترجع الحساب.
-
-    ملحوظة: تعمّدنا عدم استخدام reverse=True مع offset_date لأن التوليفة دي فيها
-    مشكلة معروفة في Telethon بترجع نتايج فاضية/غلط. بدل كده بنمسح بالترتيب
-    الطبيعي (الأحدث الأول) ونتخطى اللي بعد end_ts، وبنكمل لحد آخر رسالة
-    في الشات من غير ما نوقف عند start_ts.
-    """
-    all_tracked = set(team1) | set(team2)
-
-    raw_mentions = []   # {from, to, ts, msg_id}
-    msg_index = {}       # msg_id -> {"sender": "@x", "ts": ..., "mention_ids": [index في raw_mentions]}
-    scanned = 0
-    skipped_no_username = 0
-    skipped_not_tracked = 0
-    tracked_hits = 0
-
-    async for message in client.iter_messages(chat):
-        if not message.date:
-            continue
-        msg_ts = message.date.timestamp()
-        if msg_ts > end_ts:
-            continue   # رسالة أحدث من نهاية الفترة — كمّل للي بعدها (وقت أقدم)
-        # ملحوظة: مفيش break هنا عمداً — بنكمل المسح لحد آخر رسالة في الجروب
-        # عشان نلقط كل تاكات اللاعبين المتابَعين حتى لو كانت قبل start_ts.
-
-        scanned += 1
-        try:
-            sender = await message.get_sender()
-        except Exception as e:
-            print(f"⚠️ مقدرش أجيب مرسل رسالة {message.id}: {e}")
-            continue
-        sender_username = getattr(sender, "username", None)
-        if not sender_username:
-            # المرسل مفهوش يوزرنيم (أو رسالة مبعوتة بصفة "أدمن مجهول"/قناة)
-            skipped_no_username += 1
-            continue
-        sender_l = "@" + sender_username.lower()
-        if sender_l not in all_tracked:
-            skipped_not_tracked += 1
-            continue
-        tracked_hits += 1
-        preview = (message.message or "")[:80].replace("\n", " ")
-        print(f"👤 [متابَع] {sender_l} في {message.date} : {preview!r}")
-
-        mention_indices = []
-        mentioned = _extract_mentions(message.message or "")
-        off_hours = _is_off_hours(message.date)
-        for target in mentioned:
-            if target == sender_l or target not in all_tracked:
-                continue
-            same_team = (sender_l in team1 and target in team1) or \
-                        (sender_l in team2 and target in team2)
-            if same_team:
-                continue
-            raw_mentions.append({
-                "from": sender_l, "to": target, "ts": msg_ts,
-                "msg_id": message.id,
-                "voided": off_hours,
-                "void_reason": "⏰ وقت غير رسمي (من 2 لحد 9 الصبح)" if off_hours else None,
-                "link": _msg_link(chat, message.id),
-            })
-            mention_indices.append(len(raw_mentions) - 1)
-
-        msg_index[message.id] = {
-            "sender": sender_l, "ts": msg_ts,
-            "reply_to": message.reply_to_msg_id,
-            "mention_indices": mention_indices,
-        }
-
-    print(
-        f"🔎 فحصت {scanned} رسالة | من غير يوزرنيم: {skipped_no_username} | "
-        f"مش متابَع: {skipped_not_tracked} | من لاعب متابَع: {tracked_hits} | "
-        f"تاكات خام قبل قانون الإلغاء: {len(raw_mentions)}"
-    )
-
-    # قانون الإلغاء: لو صاحب المنشن اللي اتعمله رد على الرسالة خلال 10 دقايق، المنشن يتلغي
-    for mid, info in msg_index.items():
-        reply_to_id = info["reply_to"]
-        if not reply_to_id or reply_to_id not in msg_index:
-            continue
-        original = msg_index[reply_to_id]
-        for idx in original["mention_indices"]:
-            m = raw_mentions[idx]
-            if m["voided"]:
-                continue  # اتلغى قبل كده (وقت غير رسمي مثلاً) — سيبها زي ما هي
-            if m["to"] == info["sender"] and (info["ts"] - m["ts"]) <= 600:
-                m["voided"] = True
-                m["void_reason"] = "↩️ اتلغى بالرد خلال 10 دقايق"
-
-    counts = _compute_tag_counts(raw_mentions)
-    voided = _collect_voided_tags(raw_mentions)
-    team1_total = sum(e["count"] for (f, t), e in counts.items() if f in team1 and t in team2)
-    team2_total = sum(e["count"] for (f, t), e in counts.items() if f in team2 and t in team1)
-    return {"counts": counts, "team1_total": team1_total, "team2_total": team2_total, "voided": voided}
-
-async def build_tag_report_text(context, team1: list, team2: list, result: dict, label: str) -> str:
-    counts = result["counts"]
-    voided = result.get("voided", {})
-    detail_lines = []
-    for (f, t), entry in counts.items():
-        detail_lines.append(f"{f} ⬅️ {t} : {entry['count']}")
-        for i, link in enumerate(entry["links"], 1):
-            if link:
-                detail_lines.append(f"      {i}. {link}")
-    bot_username = context.bot.username or ""
-
-    voided_lines = []
-    for (f, t), items in voided.items():
-        voided_lines.append(f"{f} ⬅️ {t}:")
-        for i, it in enumerate(items, 1):
-            voided_lines.append(f"      {i}. {it['link']} — سبب: {it['reason']}")
-    voided_block = "\n".join(voided_lines) if voided_lines else "لا يوجد تاكات ملغاة خلال الفترة دي."
-
-    return (
-        f"📊 تقرير التاكات ({label})\n"
-        f"━━━━━━━━━━━━━━\n"
-        + ("\n".join(detail_lines) if detail_lines else "لا يوجد تاكات مسجلة خلال الفترة دي.") +
-        f"\n━━━━━━━━━━━━━━\n"
-        f"👥 {' '.join(team1)} → {' '.join(team2)} : {result['team1_total']}\n"
-        f"👥 {' '.join(team2)} → {' '.join(team1)} : {result['team2_total']}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🚫 التاكات الملغاة:\n{voided_block}\n"
-        + (f"@{bot_username}" if bot_username else "")
-    )
-
-async def run_tag_count_now(chat_id: int, context, team1: list, team2: list, base_ts: float):
-    """
-    بيفتح جلسة Telethon، يدخّلها الجروب تلقائي عن طريق رابط دعوة جابه البوت،
-    يحسب التاكات على فترتين (لحد يوم 2 ولحد يوم 3) ويبعتهم، وبعدين يطلّع
-    الجلسة من الجروب ويقفلها.
-    """
-    if TelegramClient is None:
-        try:
-            await context.bot.send_message(chat_id, "❌ مكتبة Telethon مش متثبتة على السيرفر.")
-        except:
-            pass
-        return
-
-    if not TELETHON_SESSION_STRING:
-        try:
-            await context.bot.send_message(chat_id, "❌ TELETHON_SESSION_STRING مش متحطوط في متغيرات البيئة.")
-        except:
-            pass
-        return
-
-    client = TelegramClient(StringSession(TELETHON_SESSION_STRING), TELETHON_API_ID, TELETHON_API_HASH)
-    await client.connect()
-    if not await client.is_user_authorized():
-        try:
-            await context.bot.send_message(chat_id, "❌ الـ session string مش صالح/منتهي. لازم تولّد واحد جديد.")
-        except:
-            pass
-        await client.disconnect()
-        return
-    chat = None
-    try:
-        # جيب رابط دعوة من البوت (لازم يكون أدمن بصلاحية دعوة أعضاء) وادخّل بيه الجلسة
-        try:
-            invite_link = await context.bot.export_chat_invite_link(chat_id)
-        except Exception as e:
-            raise RuntimeError(f"مقدرش أجيب رابط دعوة من البوت: {e}")
-
-        await _join_group_via_link(client, invite_link)
-        chat = await client.get_entity(chat_id)
-
-        for days in (2, 3):
-            end_ts = base_ts + days * 24 * 3600
-            label = f"من بداية المواجهة لحد يوم {days}"
-            try:
-                result = await _count_tags_for_range(client, chat, team1, team2, base_ts, end_ts)
-            except Exception as e:
-                print(f"❌ خطأ في حساب التاكات (يوم {days}): {e}")
-                try:
-                    await context.bot.send_message(chat_id, f"❌ حصل خطأ أثناء حساب التاكات (يوم {days}): {e}")
-                except:
-                    pass
-                continue
-            text = await build_tag_report_text(context, team1, team2, result, label)
-            try:
-                await context.bot.send_message(chat_id, text, disable_web_page_preview=True)
-            except Exception as e:
-                print(f"❌ خطأ في إرسال تقرير التاكات: {e}")
-
-    except Exception as e:
-        print(f"❌ خطأ عام في حساب التاكات: {e}")
-        try:
-            await context.bot.send_message(chat_id, f"❌ حصل خطأ أثناء دخول الجلسة للجروب: {e}")
-        except:
-            pass
-
-    finally:
-        if chat is not None:
-            try:
-                await client(LeaveChannelRequest(chat))
-                print("👋 الجلسة خرجت من الجروب.")
-            except Exception as e:
-                print(f"⚠️ مقدرش يخرج من الجروب: {e}")
-        await client.disconnect()
 
 # ─────────────────────────────────────────────
 #  استعادة المهام بعد إعادة التشغيل
@@ -2785,48 +2462,9 @@ async def _handle_msg_core(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_group_link(update, context)
         return
 
-    # ══════ 0.1 حساب التاكات — لازم "احسب تاكات" + منشن للبوت في نفس الرسالة ══════
-    # ملحوظة: الميزة دي شغالة سواء فيه مواجهة نشطة في الجروب أو لأ، عشان كده
-    # بتتخزن حالتها في pending_tag_setup المنفصل عن wars (اللي بيبقى None لو مفيش مواجهة).
+    # ══════ 0.1 منشن للبوت — بيتحسب هنا واستخدامه في أقسام تانية تحت ══════
     bot_uname = (context.bot.username or "").lower()
     mentions_bot = bool(bot_uname) and f"@{bot_uname}" in msg.lower()
-    if mentions_bot and any(trig in msg_cl for trig in TAG_COUNT_TRIGGERS):
-        if not is_tag_admin(user, is_creator):
-            await update.message.reply_text("🚫 حساب التاكات لمالك الجروب أو المسؤولين فقط.")
-            return
-        pending_tag_setup[cid] = True
-        await update.message.reply_text(
-            "📝 ابعت اليوزرات:\n"
-            "@user1 ضد @user2\n\n"
-            "أو فريق مقابل فريق:\n"
-            "@user1 @user2 ضد @user3 @user4"
-        )
-        return
-
-    if pending_tag_setup.get(cid):
-        if not is_tag_admin(user, is_creator):
-            return
-        parts = re.split(r'\s+ضد\s+|\s+vs\s+', msg, flags=re.IGNORECASE)
-        if len(parts) != 2:
-            await update.message.reply_text("❌ الصيغة غلط. اكتب: @user1 ضد @user2")
-            return
-        team1 = [u.lower() for u in re.findall(r'@\w+', parts[0])]
-        team2 = [u.lower() for u in re.findall(r'@\w+', parts[1])]
-        if not team1 or not team2:
-            await update.message.reply_text("❌ محتاج يوزر واحد على الأقل لكل طرف.")
-            return
-        base_ts = (w.get("draw_ts") or w.get("created_ts")) if w else None
-        base_ts = base_ts or now_ts()
-        pending_tag_setup.pop(cid, None)
-        if w:
-            w["tag_tracking"] = {"team1": team1, "team2": team2, "base_ts": base_ts}
-            save()
-        await update.message.reply_text(
-            f"⏳ جاري حساب التاكات بين:\n{' '.join(team1)}  ضد  {' '.join(team2)}\n"
-            f"هيوصلك تقريرين (لحد يوم 2، ولحد يوم 3) عشان تختار بينهم..."
-        )
-        asyncio.create_task(run_tag_count_now(cid, context, team1, team2, base_ts))
-        return
 
     # ══════ 0. انتظار الدور ══════
     if w and w.get("waiting_stage"):
