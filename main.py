@@ -61,8 +61,8 @@ RESULTS_DESTINATION  = 8911160665  # آيدي الشخص/الجروب اللي �
 # API_ID / API_HASH من https://my.telegram.org — مش سرية فمتحطوطين هنا مباشرة (مش env vars).
 # TELETHON_SESSION_STRING فضلت env var لأنها فعليًا تسجيل دخول جاهز لحساب حقيقي — دي
 # الحاجة الحساسة الوحيدة هنا (لو حد شافها يقدر يدخل بالحساب مباشرة من غير باسورد).
-TELETHON_API_ID         = 0  # ← حط الـ API_ID بتاعك هنا (رقم)
-TELETHON_API_HASH       = "ضع_API_HASH_هنا"
+TELETHON_API_ID         = 26604893  # ← حط الـ API_ID بتاعك هنا (رقم)
+TELETHON_API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 TELETHON_SESSION_STRING = os.environ.get("TELETHON_SESSION_STRING", "")
 AU_LINK             = "https://t.me/arab_union3"
 DATA_FILE           = "war_data.json"
