@@ -22,9 +22,16 @@ try:
         UserAlreadyParticipantError, InviteHashExpiredError,
         InviteHashInvalidError, FloodWaitError,
     )
-except ImportError:
+except ImportError as _telethon_import_error:
+    import sys
     TelegramClient = None
-    print("⚠️ مكتبة Telethon مش متثبتة — حساب التاكات مش هيشتغل. ثبّتها بـ: pip install telethon")
+    print(f"⚠️ فشل استيراد Telethon: {_telethon_import_error}")
+    print(f"⚠️ البايثون اللي البوت شغال بيه دلوقتي: {sys.executable}")
+    print("⚠️ لو مثبتها فعلاً وبرضو بتظهر الرسالة دي، غالبًا مثبتها في بايثون/بيئة تانية"
+          " غير اللي شغّلت بيها البوت. جرب تشغّل الأمر ده بنفس الطريقة اللي بتشغل بيها البوت:")
+    print("     python3 -c \"import sys; print(sys.executable)\"")
+    print("   وبعدين ثبّت المكتبة بنفس البايثون ده تحديدًا، مثلاً:")
+    print("     /المسار/اللي_ظهر/python -m pip install telethon")
 
 try:
     import httpx
@@ -54,8 +61,8 @@ RESULTS_DESTINATION  = 8911160665  # آيدي الشخص/الجروب اللي �
 # API_ID / API_HASH من https://my.telegram.org — مش سرية فمتحطوطين هنا مباشرة (مش env vars).
 # TELETHON_SESSION_STRING فضلت env var لأنها فعليًا تسجيل دخول جاهز لحساب حقيقي — دي
 # الحاجة الحساسة الوحيدة هنا (لو حد شافها يقدر يدخل بالحساب مباشرة من غير باسورد).
-TELETHON_API_ID         = 26604893  # ← حط الـ API_ID بتاعك هنا (رقم)
-TELETHON_API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
+TELETHON_API_ID         = 0  # ← حط الـ API_ID بتاعك هنا (رقم)
+TELETHON_API_HASH       = "ضع_API_HASH_هنا"
 TELETHON_SESSION_STRING = os.environ.get("TELETHON_SESSION_STRING", "")
 AU_LINK             = "https://t.me/arab_union3"
 DATA_FILE           = "war_data.json"
@@ -2004,6 +2011,218 @@ async def send_groups_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 # ─────────────────────────────────────────────
+#  نظام الإنذارات (منفصل عن نظام المواجهات — بيشتغل بغض النظر عن وجود مواجهة)
+# ─────────────────────────────────────────────
+WARNINGS_FILE = "warnings.json"
+warnings_data: dict = {}          # {str(cid): {str(uid): {"player": int, "admin": int}}}
+admin_warning_flow: dict = {}      # {cid: {"stage":..., "target_id":, "target_tag":, "grace_remaining":, "replacement_tag":}} — مش متخزن على القرص عمدًا (حالة مؤقتة قصيرة)
+
+def load_warnings():
+    global warnings_data
+    if os.path.exists(WARNINGS_FILE):
+        try:
+            with open(WARNINGS_FILE, 'r', encoding='utf-8') as f:
+                warnings_data = json.load(f)
+            print(f"✅ إنذارات محملة")
+        except Exception as e:
+            print(f"❌ خطأ في تحميل الإنذارات: {e}")
+            warnings_data = {}
+
+def save_warnings():
+    try:
+        with open(WARNINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(warnings_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ خطأ في حفظ الإنذارات: {e}")
+
+def _get_warn_entry(cid, uid) -> dict:
+    cid_s, uid_s = str(cid), str(uid)
+    chat_w = warnings_data.setdefault(cid_s, {})
+    return chat_w.setdefault(uid_s, {"player": 0, "admin": 0})
+
+async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يحدد الشخص المستهدف من: رد على رسالته، أو منشن يوزرنيم، أو آيدي رقمي في نص الرسالة.
+    بترجع (user_id, display_tag) — أو (None, None) لو مقدرش يحدده."""
+    msg = update.message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        u = msg.reply_to_message.from_user
+        tag = f"@{u.username}" if u.username else f"ID:{u.id}"
+        return u.id, tag
+
+    text = msg.text or ""
+    m = re.search(r'@(\w+)', text)
+    if m:
+        username = m.group(1)
+        try:
+            chat_obj = await context.bot.get_chat(f"@{username}")
+            return chat_obj.id, f"@{username}"
+        except Exception:
+            return None, f"@{username}"
+
+    m = re.search(r'\b(\d{5,})\b', text)
+    if m:
+        uid = int(m.group(1))
+        tag = f"ID:{uid}"
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, uid)
+            if member.user.username:
+                tag = f"@{member.user.username}"
+        except Exception:
+            pass
+        return uid, tag
+
+    return None, None
+
+async def handle_warning_system(update: Update, context: ContextTypes.DEFAULT_TYPE, cid, is_creator: bool) -> bool:
+    """
+    بيتعامل مع كل حاجة خاصة بالإنذارات (أوامر + حالة السؤال والجواب مع المالك +
+    مهلة تحديد المسؤول البديل). بترجع True لو الرسالة اتاخد بالها من هنا (يعني
+    handle_msg لازم يوقف ومايكملش)، و False لو الرسالة مالهاش علاقة بالإنذارات خالص.
+    """
+    user = update.effective_user
+    msg = update.message.text or ""
+    msg_cl = clean(msg)
+
+    flow = admin_warning_flow.get(cid)
+
+    # 1) إحنا في فترة السماح (3 رسايل) والراسل هو الشخص المطرود نفسه
+    if flow and flow["stage"] == "grace_period" and user and user.id == flow["target_id"]:
+        mentioned = re.findall(r'@\w+', msg)
+        if mentioned:
+            flow["replacement_tag"] = mentioned[0]
+            flow["stage"] = "ask_role"
+            await update.message.reply_text(
+                f"✅ اتحدد {mentioned[0]} كمسؤول بديل عن {flow['target_tag']}.\n\n"
+                f"👑 يا مالك الجروب: {flow['target_tag']} مسؤول فقط ولا مسؤول ولاعب؟\n"
+                f"اكتب: مسؤول فقط / مسؤول ولاعب"
+            )
+        else:
+            flow["grace_remaining"] -= 1
+            if flow["grace_remaining"] <= 0:
+                flow["stage"] = "ask_role"
+                await update.message.reply_text(
+                    f"⌛ انتهت مهلة تحديد المسؤول البديل بدون تحديد.\n\n"
+                    f"👑 يا مالك الجروب: {flow['target_tag']} مسؤول فقط ولا مسؤول ولاعب؟\n"
+                    f"اكتب: مسؤول فقط / مسؤول ولاعب"
+                )
+        return True
+
+    # 2) إحنا مستنيين رد المالك: "حدد مسؤول بديل بالفعل؟"
+    if flow and flow["stage"] == "ask_replacement" and is_creator:
+        if any(k in msg_cl for k in ("نعم", "ايوه", "ايوة", "اه", "حدد")):
+            flow["stage"] = "ask_role"
+            await update.message.reply_text(
+                f"👑 يا مالك الجروب: {flow['target_tag']} مسؤول فقط ولا مسؤول ولاعب؟\n"
+                f"اكتب: مسؤول فقط / مسؤول ولاعب"
+            )
+        elif any(k in msg_cl for k in ("لا", "لأ", "مفيش", "محددش")):
+            flow["stage"] = "grace_period"
+            flow["grace_remaining"] = 3
+            await update.message.reply_text(
+                f"⏳ حصل {flow['target_tag']} على 3 رسايل بس عشان يحدد مسؤول بديل "
+                f"(منشن للبديل، مثلاً: \"قائد بدالي @user\")."
+            )
+        else:
+            await update.message.reply_text("❓ اكتب: نعم / لأ")
+        return True
+
+    # 3) إحنا مستنيين رد المالك: "مسؤول فقط ولا مسؤول ولاعب؟"
+    if flow and flow["stage"] == "ask_role" and is_creator:
+        is_player_too = "لاعب" in msg_cl
+        only_admin = ("فقط" in msg_cl) and not is_player_too
+        if only_admin:
+            try:
+                await context.bot.ban_chat_member(cid, flow["target_id"])
+                await update.message.reply_text(f"🚫 تم طرد {flow['target_tag']} من الجروب (كان مسؤول فقط).")
+            except Exception as e:
+                await update.message.reply_text(f"❌ حصل خطأ أثناء الطرد: {e}")
+        elif is_player_too:
+            await update.message.reply_text(
+                f"⚠️ تم طرد {flow['target_tag']} من صلاحية القيادة، وهيفضل في الجروب كلاعب."
+            )
+        else:
+            await update.message.reply_text("❓ اكتب: مسؤول فقط / مسؤول ولاعب")
+            return True
+        _get_warn_entry(cid, flow["target_id"])["admin"] = 0
+        save_warnings()
+        del admin_warning_flow[cid]
+        return True
+
+    # 4) الأوامر نفسها (لمالك الجروب فقط)
+    is_warn_command = msg_cl.startswith("انذار") or msg_cl.startswith("الغاء انذار")
+    if not is_warn_command:
+        return False
+
+    if not is_creator:
+        await update.message.reply_text("🚫 الإنذارات لمالك الجروب فقط.")
+        return True
+
+    if msg_cl.startswith("الغاء انذار مسؤول"):
+        uid, tag = await resolve_target(update, context)
+        if not uid:
+            await update.message.reply_text("❌ محدّدتش الشخص صح (رد / منشن / آيدي).")
+            return True
+        entry = _get_warn_entry(cid, uid)
+        entry["admin"] = max(0, entry["admin"] - 1)
+        save_warnings()
+        await update.message.reply_text(f"↩️ اتلغى إنذار مسؤول واحد لـ {tag} ({entry['admin']}/3).")
+        return True
+
+    if msg_cl.startswith("الغاء انذار"):
+        uid, tag = await resolve_target(update, context)
+        if not uid:
+            await update.message.reply_text("❌ محدّدتش الشخص صح (رد / منشن / آيدي).")
+            return True
+        entry = _get_warn_entry(cid, uid)
+        entry["player"] = max(0, entry["player"] - 1)
+        save_warnings()
+        await update.message.reply_text(f"↩️ اتلغى إنذار واحد لـ {tag} ({entry['player']}/3).")
+        return True
+
+    if msg_cl.startswith("انذار مسؤول"):
+        uid, tag = await resolve_target(update, context)
+        if not uid:
+            await update.message.reply_text("❌ محدّدتش الشخص صح (رد / منشن / آيدي).")
+            return True
+        entry = _get_warn_entry(cid, uid)
+        entry["admin"] += 1
+        save_warnings()
+        if entry["admin"] >= 3:
+            admin_warning_flow[cid] = {
+                "stage": "ask_replacement", "target_id": uid, "target_tag": tag,
+                "grace_remaining": 0, "replacement_tag": None,
+            }
+            await update.message.reply_text(
+                f"🚨 {tag} وصل لـ 3 إنذارات كمسؤول.\n\n"
+                f"👑 يا مالك الجروب: هل {tag} حدد مسؤول بديل بالفعل؟\n"
+                f"اكتب: نعم / لأ"
+            )
+        else:
+            await update.message.reply_text(f"⚠️ إنذار مسؤول لـ {tag} ({entry['admin']}/3).")
+        return True
+
+    if msg_cl.startswith("انذار"):
+        uid, tag = await resolve_target(update, context)
+        if not uid:
+            await update.message.reply_text("❌ محدّدتش الشخص صح (رد / منشن / آيدي).")
+            return True
+        entry = _get_warn_entry(cid, uid)
+        entry["player"] += 1
+        if entry["player"] >= 3:
+            try:
+                await context.bot.ban_chat_member(cid, uid)
+                await update.message.reply_text(f"🚫 تم طرد {tag} من الجروب لاستكمال 3 إنذارات.")
+                entry["player"] = 0
+            except Exception as e:
+                await update.message.reply_text(f"❌ حصل خطأ أثناء الطرد: {e}")
+        else:
+            await update.message.reply_text(f"⚠️ إنذار لـ {tag} ({entry['player']}/3).")
+        save_warnings()
+        return True
+
+    return False
+
+# ─────────────────────────────────────────────
 #  جلب mention المالك
 # ─────────────────────────────────────────────
 async def get_owner_mention(context, chat_id: int) -> str:
@@ -2267,16 +2486,10 @@ async def _join_group_via_link(client, invite_link: str):
 
 async def _count_tags_for_range(client, chat, team1: list, team2: list, start_ts: float, end_ts: float) -> dict:
     """
-    تدور في تاريخ الجروب **كله** من الأحدث للأقدم (الترتيب الطبيعي في تيليجرام)،
-    تتخطى بس الرسايل اللي وقتها بعد end_ts، وتفحص كل حاجة تانية لحد آخر
-    رسالة في الجروب — عشان تلقط كل تاكات اللاعبين المتابَعين حتى لو كانت
-    قبل بداية المواجهة. تجمع كل المنشنات بين team1 و team2، تطبق قانون
-    الإلغاء (رد خلال 10 دقايق)، وترجع الحساب.
-
-    ملحوظة: تعمّدنا عدم استخدام reverse=True مع offset_date لأن التوليفة دي فيها
-    مشكلة معروفة في Telethon بترجع نتايج فاضية/غلط. بدل كده بنمسح بالترتيب
-    الطبيعي (الأحدث الأول) ونتخطى اللي بعد end_ts، وبنكمل لحد آخر رسالة
-    في الشات من غير ما نوقف عند start_ts.
+    تدور في تاريخ الجروب من end_ts (الأحدث) لحد start_ts (بداية المواجهة) بس،
+    وبتوقف تلقائي أول ما توصل لرسالة أقدم من start_ts. تجمع كل المنشنات بين
+    team1 و team2 خلال الفترة دي بس، تطبق قانون الإلغاء (رد خلال 10 دقايق)
+    وقانون الوقت الغير رسمي، وترجع الحساب.
     """
     all_tracked = set(team1) | set(team2)
 
@@ -2293,8 +2506,12 @@ async def _count_tags_for_range(client, chat, team1: list, team2: list, start_ts
         msg_ts = message.date.timestamp()
         if msg_ts > end_ts:
             continue   # رسالة أحدث من نهاية الفترة — كمّل للي بعدها (وقت أقدم)
-        # ملحوظة: مفيش break هنا عمداً — بنكمل المسح لحد آخر رسالة في الجروب
-        # عشان نلقط كل تاكات اللاعبين المتابَعين حتى لو كانت قبل start_ts.
+        if msg_ts < start_ts:
+            # وصلنا لرسالة أقدم من بداية المواجهة. بما إن iter_messages بترجع
+            # الرسايل بترتيب الأحدث فالأقدم، فأي رسالة بعد كده هتكون أقدم كمان،
+            # فمفيش داعي نكمل المسح — نوقف هنا (يوفر وقت ومكالمات API، ويمنع
+            # احتساب تاكات حصلت قبل ما المواجهة تبدأ أصلاً).
+            break
 
         scanned += 1
         try:
@@ -2427,11 +2644,18 @@ async def run_tag_count_now(chat_id: int, context, team1: list, team2: list, bas
         return
     chat = None
     try:
-        # جيب رابط دعوة من البوت (لازم يكون أدمن بصلاحية دعوة أعضاء) وادخّل بيه الجلسة
+        # استخدم رابط المواجهة المخزّن (نفسه اللي بيتبعت للمسؤول) بدل ما نعمل
+        # رابط جديد يلغي القديم في كل مرة (get_or_create_war_link بيخزنه أول
+        # مرة بس ويرجّع نفس القيمة بعد كده — نفس منطق تعديل رقم 2).
+        w = wars.get(chat_id)
+        if w is None:
+            raise RuntimeError("المواجهة مش موجودة في البيانات (اتشالت أو اتغيرت).")
         try:
-            invite_link = await context.bot.export_chat_invite_link(chat_id)
+            invite_link = await get_or_create_war_link(context, chat_id, w)
         except Exception as e:
             raise RuntimeError(f"مقدرش أجيب رابط دعوة من البوت: {e}")
+        if not invite_link:
+            raise RuntimeError("مقدرش أجيب رابط دعوة من البوت (لازم يكون أدمن بصلاحية دعوة أعضاء).")
 
         await _join_group_via_link(client, invite_link)
         chat = await client.get_entity(chat_id)
@@ -2759,6 +2983,10 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     w = wars.get(cid)
 
+    # ══════ نظام الإنذارات (منفصل عن أي مواجهة) ══════
+    if await handle_warning_system(update, context, cid, is_creator):
+        return
+
     # ══════ 0.0 أمر الرابط ══════
     if msg_cl.strip() in LINK_TRIGGERS:
         await cmd_group_link(update, context)
@@ -3080,6 +3308,7 @@ if __name__ == "__main__":
     load_images()
     load_groups()
     load_rules()
+    load_warnings()
 
     app = (
         Application.builder()
