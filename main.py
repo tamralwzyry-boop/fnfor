@@ -65,9 +65,21 @@ TELETHON_API_ID         = 26604893  # ← حط الـ API_ID بتاعك هنا (
 TELETHON_API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 TELETHON_SESSION_STRING = os.environ.get("TELETHON_SESSION_STRING", "")
 AU_LINK             = "https://t.me/arab_union3"
-DATA_FILE           = "war_data.json"
-IMAGES_FILE         = "stage_images.json"
-RULES_FILE          = "war_rules.txt"
+
+# ── مسار التخزين الدائم ──
+# لازم يبقى فولدر متركب عليه Volume في Railway (متغير البيئة DATA_DIR بيحدد مساره،
+# مثلاً DATA_DIR=/data). لو DATA_DIR مش متظبط، الملفات بتترجع تتخزن جنب الكود
+# كالمعتاد (وده اللي بيخليها تتمسح مع كل ديبلوي جديد على Railway).
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _dp(filename: str) -> str:
+    """يرجع مسار الملف جوه فولدر التخزين الدائم."""
+    return os.path.join(DATA_DIR, filename)
+
+DATA_FILE           = _dp("war_data.json")
+IMAGES_FILE         = _dp("stage_images.json")
+RULES_FILE          = _dp("war_rules.txt")
 
 # ── إعدادات الحكم الآلي بالذكاء الاصطناعي (Gemini — مجاني تماماً وسريع) ──
 # الـ7 مفاتيح env vars (زي التوكن) — كل مفتاح من حساب Gmail مختلف.
@@ -102,7 +114,7 @@ TIME_REMIND_2 = 3 * 24 * 3600
 TIME_AUTO_END = 6 * 3600
 
 # ── قفل التحديث (تتفعل مرة واحدة فقط، أول ما البوت يشتغل بالكود ده — راجع MAINTENANCE_FILE) ──
-MAINTENANCE_FILE          = "maintenance_lock.json"
+MAINTENANCE_FILE          = _dp("maintenance_lock.json")
 MAINTENANCE_REOPEN_HOUR   = 11   # 11 الظهر
 MAINTENANCE_REOPEN_WEEKDAY = 3   # الخميس (Monday=0 ... Thursday=3)
 
@@ -171,7 +183,7 @@ TAG_COUNT_TRIGGERS = {"احسب تاكات", "احسب التاكات", "احس�
 
 # كلمات تشغيل أمر عرض كل الجروبات المسجلة (خاص المسؤولين فقط)
 GROUPS_LIST_TRIGGERS = {"الجروبات", "كل الجروبات", "جروبات"}
-GROUPS_FILE = "known_groups.json"
+GROUPS_FILE = _dp("known_groups.json")
 
 def detect_stage(text: str):
     t = text.strip()
@@ -2112,7 +2124,7 @@ async def task_reopen_maintenance(bot, delay: float):
 # ─────────────────────────────────────────────
 #  نظام الإنذارات (منفصل عن نظام المواجهات — بيشتغل بغض النظر عن وجود مواجهة)
 # ─────────────────────────────────────────────
-WARNINGS_FILE = "warnings.json"
+WARNINGS_FILE = _dp("warnings.json")
 warnings_data: dict = {}
 admin_warning_flow: dict = {}
 
