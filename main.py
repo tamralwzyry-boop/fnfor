@@ -2064,6 +2064,18 @@ def load_maintenance():
     else:
         maintenance_state = {}
 
+    # تنضيف مرة واحدة: أي جروب اتسجّل "متقفل" من الكود القديم (بغلطة كانت
+    # بتسجّله فورًا قبل التأكد من نجاح القفل فعليًا) لازم يتشال من القايمة
+    # عشان البوت يحاول يقفله تاني صح أول ما توصله رسالة جديدة.
+    groups = maintenance_state.get("groups")
+    if isinstance(groups, dict) and groups:
+        stale = [cid_s for cid_s, v in groups.items() if not v]
+        if stale:
+            for cid_s in stale:
+                del groups[cid_s]
+            print(f"🧹 اتشالت {len(stale)} جروب متسجل غلط 'متقفل' عشان يتحاول يتقفل تاني")
+            save_maintenance()
+
 def save_maintenance():
     try:
         with open(MAINTENANCE_FILE, 'w', encoding='utf-8') as f:
@@ -2110,29 +2122,28 @@ def _safe_permissions_kwargs(d: dict) -> dict:
     زي can_send_media_messages أو can_send_other_messages ميوقعوش الكود."""
     return {k: v for k, v in (d or {}).items() if k in _CP_VALID_KEYS}
 
+_locking_in_progress: set = set()  # حماية مؤقتة (مش محفوظة) من تكرار المحاولة في نفس اللحظة بس
+
 async def lock_group_if_needed(bot, chat):
-    """لو قفل التحديث شغال دلوقتي ولسه الجروب ده متقفلش، يحفظ صلاحياته الحالية
-    فورًا ويقفل كل حاجة فيه (رسايل/صور/فيديوهات/تعديل إعدادات...). بتتنادى
-    أول ما توصل أي رسالة (نص أو صورة) في أي جروب."""
+    """لو قفل التحديث شغال دلوقتي ولسه الجروب ده متقفلش فعلاً، يحفظ صلاحياته الحالية
+    ويقفل كل حاجة فيه (رسايل/صور/فيديوهات/تعديل إعدادات...). بتتنادى أول ما توصل
+    أي رسالة (نص أو صورة) في أي جروب. لو المحاولة فشلت، الجروب مش بيتسجل "متقفل"
+    عشان يتحاول تاني تلقائيًا أول ما توصله رسالة جديدة."""
     if not chat or chat.type not in ("group", "supergroup"):
         return
     if not maintenance_state.get("active"):
         return
     cid_s = str(chat.id)
     if cid_s in maintenance_state.get("groups", {}):
-        return  # الجروب ده اتقفل قبل كده
-
-    # نسجّل الجروب كمقفول فورًا (قبل أي await) عشان لو جالنا أكتر من رسالة من
-    # نفس الجروب في نفس اللحظة ميتكررش القفل عليه.
-    maintenance_state.setdefault("groups", {})[cid_s] = {}
-    save_maintenance()
+        return  # الجروب ده اتقفل فعلاً قبل كده (بنجاح)
+    if cid_s in _locking_in_progress:
+        return  # في محاولة شغالة عليه دلوقتي، متكررش
+    _locking_in_progress.add(cid_s)
 
     cid = chat.id
     try:
         full_chat = await bot.get_chat(cid)
         saved = full_chat.permissions.to_dict() if full_chat.permissions else {}
-        maintenance_state["groups"][cid_s] = saved
-        save_maintenance()
 
         if saved:
             locked = ChatPermissions(**{k: False for k in _safe_permissions_kwargs(saved).keys()})
@@ -2146,9 +2157,15 @@ async def lock_group_if_needed(bot, chat):
             )
         await bot.set_chat_permissions(cid, locked)
         await bot.send_message(cid, MAINTENANCE_CLOSE_TEXT, parse_mode="HTML")
+
+        # نسجّل الجروب "متقفل" بس بعد ما القفل والرسالة اتبعتوا بنجاح فعلاً
+        maintenance_state.setdefault("groups", {})[cid_s] = saved
+        save_maintenance()
         print(f"🔒 اتقفل الجروب {cid_s} (أول رسالة بعد تفعيل قفل التحديث)")
     except Exception as e:
-        print(f"❌ خطأ في قفل الجروب {cid_s}: {e}")
+        print(f"❌ خطأ في قفل الجروب {cid_s} (هيتحاول تاني أول ما توصله رسالة جديدة): {e}")
+    finally:
+        _locking_in_progress.discard(cid_s)
 
 async def task_reopen_maintenance(bot, delay: float):
     if delay > 0:
