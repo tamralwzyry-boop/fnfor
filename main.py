@@ -77,6 +77,25 @@ def _dp(filename: str) -> str:
     """يرجع مسار الملف جوه فولدر التخزين الدائم."""
     return os.path.join(DATA_DIR, filename)
 
+# ── ترحيل تلقائي (مرة واحدة فقط) ──
+# أول مرة يشتغل فيها البوت بعد إضافة DATA_DIR، الملفات القديمة (المواجهات الشغالة
+# وغيرها) كانت متخزنة جنب الكود مباشرة. لو الملف الجديد جوه DATA_DIR لسه مش موجود
+# بس فيه نسخة قديمة جنب الكود، بننسخها تلقائي عشان مانضيعش أي بيانات شغالة.
+def _migrate_if_needed(filename: str):
+    new_path = _dp(filename)
+    old_path = os.path.join(".", filename)
+    if DATA_DIR != "." and not os.path.exists(new_path) and os.path.exists(old_path):
+        try:
+            import shutil
+            shutil.copy2(old_path, new_path)
+            print(f"📦 اترحّل {filename} من المسار القديم لـ {new_path}")
+        except Exception as e:
+            print(f"⚠️ فشل ترحيل {filename}: {e}")
+
+for _f in ("war_data.json", "stage_images.json", "war_rules.txt",
+           "maintenance_lock.json", "known_groups.json", "warnings.json"):
+    _migrate_if_needed(_f)
+
 DATA_FILE           = _dp("war_data.json")
 IMAGES_FILE         = _dp("stage_images.json")
 RULES_FILE          = _dp("war_rules.txt")
