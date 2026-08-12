@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import threading
+import inspect
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from telegram import Update, ChatPermissions
@@ -2101,6 +2102,14 @@ async def run_maintenance_lock_once(bot):
     print("🔒 قفل التحديث اتفعل — كل جروب هيتقفل لوحده أول ما توصله رسالة، "
           f"والفتح التلقائي هيكون الساعة {datetime.fromtimestamp(reopen_ts, tz=timezone.utc)} (UTC)")
 
+_CP_VALID_KEYS = set(inspect.signature(ChatPermissions.__init__).parameters.keys()) - {"self"}
+
+def _safe_permissions_kwargs(d: dict) -> dict:
+    """يفلتر أي dict صلاحيات بحيث ميفضلش غير المفاتيح اللي فعلاً
+    مقبولة في نسخة ChatPermissions المنصّبة، عشان مفاتيح قديمة/محذوفة
+    زي can_send_media_messages أو can_send_other_messages ميوقعوش الكود."""
+    return {k: v for k, v in (d or {}).items() if k in _CP_VALID_KEYS}
+
 async def lock_group_if_needed(bot, chat):
     """لو قفل التحديث شغال دلوقتي ولسه الجروب ده متقفلش، يحفظ صلاحياته الحالية
     فورًا ويقفل كل حاجة فيه (رسايل/صور/فيديوهات/تعديل إعدادات...). بتتنادى
@@ -2126,7 +2135,7 @@ async def lock_group_if_needed(bot, chat):
         save_maintenance()
 
         if saved:
-            locked = ChatPermissions(**{k: False for k in saved.keys()})
+            locked = ChatPermissions(**{k: False for k in _safe_permissions_kwargs(saved).keys()})
         else:
             locked = ChatPermissions(
                 can_send_messages=False, can_send_audios=False, can_send_documents=False,
@@ -2149,7 +2158,7 @@ async def task_reopen_maintenance(bot, delay: float):
     for cid_s, saved in list(maintenance_state.get("groups", {}).items()):
         cid = int(cid_s)
         try:
-            restored = ChatPermissions(**saved) if saved else ChatPermissions(can_send_messages=True)
+            restored = ChatPermissions(**_safe_permissions_kwargs(saved)) if saved else ChatPermissions(can_send_messages=True)
             await bot.set_chat_permissions(cid, restored)
             await bot.send_message(cid, MAINTENANCE_REOPEN_TEXT)
         except Exception as e:
