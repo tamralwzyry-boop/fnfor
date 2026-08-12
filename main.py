@@ -2084,9 +2084,10 @@ def _next_maintenance_reopen_ts() -> float:
     return target_utc.timestamp()
 
 async def run_maintenance_lock_once(bot):
-    """بتتفعل مرة واحدة بس (أول تشغيل للبوت بالكود الجديد): تبعت التنبيه، تحفظ
-    إعدادات كل جروب، تقفل كل حاجة (رسايل/فيديوهات/إعدادات الشات)، وتجدول الفتح
-    التلقائي الخميس الساعة 11 الظهر."""
+    """بتتفعل مرة واحدة بس (أول تشغيل للبوت بالكود الجديد): بتجهّز قفل التحديث
+    وتجدول الفتح التلقائي الخميس الساعة 11 الظهر.
+    ملحوظة: القفل الفعلي لكل جروب بيحصل لوحده أول ما توصله أول رسالة بعد كده
+    (شوف lock_group_if_needed) — مش كل الجروبات مرة واحدة هنا."""
     if maintenance_state.get("triggered"):
         return
     maintenance_state["triggered"] = True
@@ -2096,33 +2097,49 @@ async def run_maintenance_lock_once(bot):
     maintenance_state["groups"]    = {}
     save_maintenance()
 
-    active_groups = {k: v for k, v in known_groups.items() if not v.get("removed")}
-    for cid_s in active_groups:
-        cid = int(cid_s)
-        try:
-            chat  = await bot.get_chat(cid)
-            saved = chat.permissions.to_dict() if chat.permissions else {}
-            maintenance_state["groups"][cid_s] = saved
-            save_maintenance()
-
-            if saved:
-                locked = ChatPermissions(**{k: False for k in saved.keys()})
-            else:
-                locked = ChatPermissions(
-                    can_send_messages=False, can_send_audios=False, can_send_documents=False,
-                    can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
-                    can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
-                    can_add_web_page_previews=False, can_change_info=False,
-                    can_invite_users=False, can_pin_messages=False,
-                )
-            await bot.set_chat_permissions(cid, locked)
-            await bot.send_message(cid, MAINTENANCE_CLOSE_TEXT, parse_mode="HTML")
-        except Exception as e:
-            print(f"❌ خطأ في قفل الجروب {cid_s}: {e}")
-
     asyncio.create_task(task_reopen_maintenance(bot, max(0.0, reopen_ts - now_ts())))
-    print(f"🔒 قفل التحديث اتفعل في {len(maintenance_state['groups'])} جروب — الفتح تلقائي الساعة "
-          f"{datetime.fromtimestamp(reopen_ts, tz=timezone.utc)} (UTC)")
+    print("🔒 قفل التحديث اتفعل — كل جروب هيتقفل لوحده أول ما توصله رسالة، "
+          f"والفتح التلقائي هيكون الساعة {datetime.fromtimestamp(reopen_ts, tz=timezone.utc)} (UTC)")
+
+async def lock_group_if_needed(bot, chat):
+    """لو قفل التحديث شغال دلوقتي ولسه الجروب ده متقفلش، يحفظ صلاحياته الحالية
+    فورًا ويقفل كل حاجة فيه (رسايل/صور/فيديوهات/تعديل إعدادات...). بتتنادى
+    أول ما توصل أي رسالة (نص أو صورة) في أي جروب."""
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    if not maintenance_state.get("active"):
+        return
+    cid_s = str(chat.id)
+    if cid_s in maintenance_state.get("groups", {}):
+        return  # الجروب ده اتقفل قبل كده
+
+    # نسجّل الجروب كمقفول فورًا (قبل أي await) عشان لو جالنا أكتر من رسالة من
+    # نفس الجروب في نفس اللحظة ميتكررش القفل عليه.
+    maintenance_state.setdefault("groups", {})[cid_s] = {}
+    save_maintenance()
+
+    cid = chat.id
+    try:
+        full_chat = await bot.get_chat(cid)
+        saved = full_chat.permissions.to_dict() if full_chat.permissions else {}
+        maintenance_state["groups"][cid_s] = saved
+        save_maintenance()
+
+        if saved:
+            locked = ChatPermissions(**{k: False for k in saved.keys()})
+        else:
+            locked = ChatPermissions(
+                can_send_messages=False, can_send_audios=False, can_send_documents=False,
+                can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+                can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
+                can_add_web_page_previews=False, can_change_info=False,
+                can_invite_users=False, can_pin_messages=False,
+            )
+        await bot.set_chat_permissions(cid, locked)
+        await bot.send_message(cid, MAINTENANCE_CLOSE_TEXT, parse_mode="HTML")
+        print(f"🔒 اتقفل الجروب {cid_s} (أول رسالة بعد تفعيل قفل التحديث)")
+    except Exception as e:
+        print(f"❌ خطأ في قفل الجروب {cid_s}: {e}")
 
 async def task_reopen_maintenance(bot, delay: float):
     if delay > 0:
@@ -2880,6 +2897,7 @@ async def cmd_setimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
+    await lock_group_if_needed(context.bot, update.effective_chat)
     caption = (update.message.caption or "").strip()
     if re.match(r'^/setimage', caption, re.IGNORECASE):
         await cmd_setimage(update, context)
@@ -3033,6 +3051,84 @@ async def handle_private_war_list(update: Update, context: ContextTypes.DEFAULT_
     )
 
 # ─────────────────────────────────────────────
+#  استرجاع مواجهة ضايعة من الرسالة المثبتة (بدون تيلثون)
+#  بيتفعل تلقائي أول رسالة توصل لأي جروب مسجّلة فيه مواجهة قديمة اختفت من
+#  war_data.json (زي بعد نقل DATA_DIR) لكن لسه الجدول مثبّت في الجروب.
+# ─────────────────────────────────────────────
+_recovery_checked: set = set()
+
+_EMOJI_TO_DIGIT = {'0️⃣': '0', '1️⃣': '1', '2️⃣': '2', '3️⃣': '3', '4️⃣': '4',
+                    '5️⃣': '5', '6️⃣': '6', '7️⃣': '7', '8️⃣': '8', '9️⃣': '9'}
+
+def _de_emoji(s: str) -> str:
+    for e, d in _EMOJI_TO_DIGIT.items():
+        s = s.replace(e, d)
+    return s
+
+async def try_recover_war(cid: int, context):
+    """يحاول يعيد بناء حالة المواجهة من الرسالة المثبتة في الجروب. مرة واحدة لكل جروب."""
+    if cid in wars:
+        return wars[cid]
+    if cid in _recovery_checked:
+        return None
+    _recovery_checked.add(cid)
+
+    try:
+        chat = await context.bot.get_chat(cid)
+        pinned = chat.pinned_message
+    except Exception:
+        return None
+    if not pinned or not pinned.text:
+        return None
+
+    text = pinned.text
+    m = re.search(r'⚔️\s*(\S+)\s+(\d+)\s*-\s*(\d+)\s+(\S+)', text)
+    if m:
+        c1n, c1s, c2s, c2n = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+    else:
+        m2 = re.search(r'A-\s*\[\s*(\S+)\s*\]\s*VS\s*B-\s*\[\s*(\S+)\s*\]', text)
+        if not m2:
+            return None
+        c1n, c2n, c1s, c2s = m2.group(1), m2.group(2), 0, 0
+
+    matches = []
+    for line in text.splitlines():
+        line = _de_emoji(line)
+        mm = re.match(r'^\s*\d+\s*\|\s*(\S+)\s+(\d)\s*\|🆚\|\s*(\d)\s+(\S+)', line)
+        if mm:
+            p1, s1, s2, p2 = mm.group(1), int(mm.group(2)), int(mm.group(3)), mm.group(4)
+            matches.append({"p1": p1, "p2": p2, "s1": s1, "s2": s2})
+    if not matches:
+        return None
+
+    stats1, stats2 = [], []
+    for mch in matches:
+        if mch["s1"] == mch["s2"]:
+            continue
+        if mch["s1"] > mch["s2"]:
+            stats1.append({"name": mch["p1"], "goals": mch["s1"], "rec": mch["s2"], "is_free": False})
+        else:
+            stats2.append({"name": mch["p2"], "goals": mch["s2"], "rec": mch["s1"], "is_free": False})
+
+    w = {
+        "c1": {"n": c1n, "s": c1s, "p": [mch["p1"] for mch in matches], "leader": None, "stats": stats1},
+        "c2": {"n": c2n, "s": c2s, "p": [mch["p2"] for mch in matches], "leader": None, "stats": stats2},
+        "matches": matches,
+        "mid": pinned.message_id,
+        "active": True,
+        "draw_ts": now_ts(),
+        "reminded_1": True,
+        "reminded_2": True,
+        "link_sent": False,
+        "referee": None,
+        "recovered": True,
+    }
+    wars[cid] = w
+    save()
+    print(f"♻️ اترجعت مواجهة {c1n} vs {c2n} في الجروب {cid} من الرسالة المثبتة")
+    return w
+
+# ─────────────────────────────────────────────
 #  المعالج الرئيسي (داخل الجروبات)
 # ─────────────────────────────────────────────
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3047,6 +3143,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u_tag  = f"@{user.username}" if user.username else f"ID:{user.id}"
 
     remember_chat(update.effective_chat)
+    await lock_group_if_needed(context.bot, update.effective_chat)
 
     try:
         cm         = await context.bot.get_chat_member(cid, user.id)
@@ -3057,6 +3154,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_ref     = False
 
     w = wars.get(cid)
+    if not w:
+        w = await try_recover_war(cid, context)
 
     if await handle_warning_system(update, context, cid, is_creator):
         return
