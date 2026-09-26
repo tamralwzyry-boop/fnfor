@@ -2181,7 +2181,18 @@ async def _end_war(update, context, cid, w, win_k):
 async def post_init(application):
     await restore_tasks(application.bot)
 
-    if not maintenance_state.get("triggered"):
+    # ── فتح فوري لمرة واحدة (يخص ترقية الاستضافة لهذه النسخة) ──
+    # لو فيه قفل تحديث شغال حاليًا (active=True) من نسخة سابقة، وده أول تشغيل
+    # لهذه النسخة الجديدة، افتح كل الجروبات فورًا بنفس صلاحياتها المحفوظة
+    # بدل ما تستنى الموعد المجدول (الخميس 11). العلامة one_time_reopen_done
+    # بتتحط بعد أول مرة عشان ده ميتكررش في أي ريستارت مستقبلي — أي قفل جديد
+    # يحصل بعد كده هيفضل ياخد مساره الطبيعي وينتظر الموعد المحدد زي الأصل.
+    if maintenance_state.get("active") and not maintenance_state.get("one_time_reopen_done"):
+        maintenance_state["one_time_reopen_done"] = True
+        save_maintenance()
+        print("🔓 فتح فوري لمرة واحدة (نسخة جديدة) — هيتم فتح كل الجروبات المقفولة الآن بنفس إعداداتها السابقة.")
+        asyncio.create_task(task_reopen_maintenance(application.bot, 0))
+    elif not maintenance_state.get("triggered"):
         asyncio.create_task(run_maintenance_lock_once(application.bot))
     elif maintenance_state.get("active") and maintenance_state.get("reopen_ts"):
         remaining = max(0.0, float(maintenance_state["reopen_ts"]) - now_ts())
@@ -2223,6 +2234,6 @@ if __name__ == "__main__":
         handle_msg
     ))
 
-    print("✅ البوت يعمل.")
+    print("✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
     app.run_polling(drop_pending_updates=True)
