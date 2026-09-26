@@ -1,3 +1,12 @@
+# ─────────────────────────────────────────────
+#  القائمة السوداء (أشخاص يتطردوا فورًا عند تفعيل أي "Clan VS Clan")
+#  حط آيدي رقمي واحد في كل سطر جوه الأقواس. تقدر تضيف/تشيل في أي وقت،
+#  والتعديل هيتفعّل من غير ما تحتاج تلمس أي حتة تانية في الكود.
+# ─────────────────────────────────────────────
+BANNED_USER_IDS_MANUAL = {
+    8113588437,
+}
+
 import random
 import re
 import asyncio
@@ -59,18 +68,12 @@ TOKEN                = os.environ.get("BOT_TOKEN")
 RESULTS_DESTINATION  = 8911160665  # آيدي الشخص/الجروب اللي هيوصله رابط المواجهة
 
 # ── إعدادات جلسة Telethon (لحساب التاكات من الهستوري) ──
-# API_ID / API_HASH من https://my.telegram.org — مش سرية فمتحطوطين هنا مباشرة (مش env vars).
-# TELETHON_SESSION_STRING فضلت env var لأنها فعليًا تسجيل دخول جاهز لحساب حقيقي — دي
-# الحاجة الحساسة الوحيدة هنا (لو حد شافها يقدر يدخل بالحساب مباشرة من غير باسورد).
 TELETHON_API_ID         = 26604893  # ← حط الـ API_ID بتاعك هنا (رقم)
 TELETHON_API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 TELETHON_SESSION_STRING = os.environ.get("TELETHON_SESSION_STRING", "")
 AU_LINK             = "https://t.me/arab_union3"
 
 # ── مسار التخزين الدائم ──
-# لازم يبقى فولدر متركب عليه Volume في Railway (متغير البيئة DATA_DIR بيحدد مساره،
-# مثلاً DATA_DIR=/data). لو DATA_DIR مش متظبط، الملفات بتترجع تتخزن جنب الكود
-# كالمعتاد (وده اللي بيخليها تتمسح مع كل ديبلوي جديد على Railway).
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -78,10 +81,6 @@ def _dp(filename: str) -> str:
     """يرجع مسار الملف جوه فولدر التخزين الدائم."""
     return os.path.join(DATA_DIR, filename)
 
-# ── ترحيل تلقائي (مرة واحدة فقط) ──
-# أول مرة يشتغل فيها البوت بعد إضافة DATA_DIR، الملفات القديمة (المواجهات الشغالة
-# وغيرها) كانت متخزنة جنب الكود مباشرة. لو الملف الجديد جوه DATA_DIR لسه مش موجود
-# بس فيه نسخة قديمة جنب الكود، بننسخها تلقائي عشان مانضيعش أي بيانات شغالة.
 def _migrate_if_needed(filename: str):
     new_path = _dp(filename)
     old_path = os.path.join(".", filename)
@@ -102,9 +101,6 @@ IMAGES_FILE         = _dp("stage_images.json")
 RULES_FILE          = _dp("war_rules.txt")
 
 # ── إعدادات الحكم الآلي بالذكاء الاصطناعي (Gemini — مجاني تماماً وسريع) ──
-# الـ7 مفاتيح env vars (زي التوكن) — كل مفتاح من حساب Gmail مختلف.
-# البوت بيتناوب بينهم أوتوماتيك (Round-Robin) على كل طلب، وبيتخطى أي مفتاح
-# ضرب حد الاستخدام (429) للمفتاح اللي بعده تلقائي.
 GEMINI_API_KEYS = [
     os.environ.get("GEMINI_API_KEY_1", ""),
     os.environ.get("GEMINI_API_KEY_2", ""),
@@ -114,11 +110,18 @@ GEMINI_API_KEYS = [
     os.environ.get("GEMINI_API_KEY_6", ""),
     os.environ.get("GEMINI_API_KEY_7", ""),
 ]
-GEMINI_MODEL   = "gemini-flash-latest"
+# ملحوظة: "gemini-flash-latest" هو alias متحرك بيتغير تبعيته مع كل نسخة جديدة
+# من جوجل، وده بيسبب أحيانًا 404/503 وقت التبديل بين النسخ. استخدام اسم نسخة
+# ثابت زي اللي تحت أكثر استقرارًا على المدى الطويل.
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_URL     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-# ── كليشة بدء المواجهة (تتبعت تلقائي + صورة + تثبيت لما تتحدد Clan vs Clan) ──
-# حط صورة "مسؤول الحكام" جنب ملف البوت باسم referee_cliche.jpg (أو غيّر المسار هنا).
+# كام مرة يعيد الدورة كاملة على كل المفاتيح لو كلهم فشلوا بـ 429/503
+GEMINI_MAX_ROUNDS = 3
+# مدة الانتظار (ثواني) قبل إعادة كل دورة (بتزيد تدريجيًا)
+GEMINI_RETRY_BASE_DELAY = 2
+
+# ── كليشة بدء المواجهة ──
 WAR_START_CLICHE_IMAGE = "referee_cliche.jpg"
 WAR_START_CLICHE_TEXT = (
     "بعد تنزيل قائمتك، يرجى الرد على القائمة بكلمة \"قائمة\" ثم كتابة شعار كلانك.\n\n"
@@ -133,10 +136,10 @@ TIME_REMIND_1 = 2 * 24 * 3600
 TIME_REMIND_2 = 3 * 24 * 3600
 TIME_AUTO_END = 6 * 3600
 
-# ── قفل التحديث (تتفعل مرة واحدة فقط، أول ما البوت يشتغل بالكود ده — راجع MAINTENANCE_FILE) ──
+# ── قفل التحديث ──
 MAINTENANCE_FILE          = _dp("maintenance_lock.json")
-MAINTENANCE_REOPEN_HOUR   = 11   # 11 الظهر
-MAINTENANCE_REOPEN_WEEKDAY = 3   # الخميس (Monday=0 ... Thursday=3)
+MAINTENANCE_REOPEN_HOUR   = 11
+MAINTENANCE_REOPEN_WEEKDAY = 3
 
 MAINTENANCE_CLOSE_TEXT = (
     "<b>📰 تـنـبـيـه إداري\n\n"
@@ -148,33 +151,32 @@ MAINTENANCE_CLOSE_TEXT = (
 
 MAINTENANCE_REOPEN_TEXT = "✅ انتهت مدة التحديث، وتم فتح اللعبة مرة أخرى."
 
-# تعديل 3: المسؤولان اللي بياخدوا قائمة المواجهات المفتوحة في الخاص
 RESPONSIBLE_USERNAMES = {"leeeeeeeeevvi", "z6_i3"}
 
+# ── قائمة الأشخاص المحظورين ──
+# أول ما يتفعل "Clan VS Clan" في أي جروب، البوت بيدوّر على كل عضو من القائمة
+# دي جوه الجروب ده ويطرده فورًا. عدّل القائمة من أول سطرين في الملف
+# (BANNED_USER_IDS_MANUAL)، مش من هنا.
+BANNED_USER_IDS = BANNED_USER_IDS_MANUAL
+BANNED_USERNAMES: set = set()  # اتشالت لصالح الآيديهات الرقمية (أدق وأضمن)
+
 def is_tag_admin(user, is_creator: bool) -> bool:
-    """مسموح بحساب التاكات لمالك الجروب الحقيقي، أو لأي حد من المسؤولين
-    (RESPONSIBLE_USERNAMES) حتى لو مش هو مالك الجروب."""
     if is_creator:
         return True
     if user and user.username and user.username.lower() in RESPONSIBLE_USERNAMES:
         return True
     return False
 
-# ── الوقت الغير رسمي: أي تاك بيتبعت في الفترة دي (بتوقيت القاهرة) ميتحسبش خالص ──
-# عدّل LOCAL_TZ_OFFSET_HOURS لو التوقيت المستخدم مختلف عن توقيت القاهرة (UTC+2).
 LOCAL_TZ_OFFSET_HOURS = 2
-OFF_HOURS_START = 2   # 2 بعد منتصف الليل
-OFF_HOURS_END   = 9   # 9 الصبح
+OFF_HOURS_START = 2
+OFF_HOURS_END   = 9
 
 def _is_off_hours(msg_dt) -> bool:
-    """بيتحقق هل وقت الرسالة (بعد تحويله لتوقيت القاهرة) واقع في الفترة الغير رسمية."""
     local_dt = msg_dt + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
     return OFF_HOURS_START <= local_dt.hour < OFF_HOURS_END
 
-# تعديل 1: مهل تسليم القوائم بالساعات لكل دور
-ROSTER_HOURS_16_QUARTER = 14   # دور الـ16 / ربع النهائي
-ROSTER_HOURS_SEMI_FINAL = 18   # نصف النهائي / النهائي
-# دور "دوري / أدوار أخرى" بيتسأل فيه الحكم عن عدد الساعات يدوياً
+ROSTER_HOURS_16_QUARTER = 14
+ROSTER_HOURS_SEMI_FINAL = 18
 
 STAGES = ["دور الـ 16", "ربع النهائي", "نصف النهائي", "النهائي", "دوري"]
 
@@ -195,13 +197,8 @@ SETIMAGE_ALIASES = {
     "دوري": "دوري", "اخرى": "دوري", "أخرى": "دوري",
 }
 
-# كلمات تشغيل أمر الرابط
 LINK_TRIGGERS = {"الرابط", "رابط", "لينك", "link", "الينك"}
-
-# كلمات تشغيل حساب التاكات (لازم تيجي مع منشن للبوت في نفس الرسالة)
 TAG_COUNT_TRIGGERS = {"احسب تاكات", "احسب التاكات", "احسب تكات", "احسب التكات"}
-
-# كلمات تشغيل أمر عرض كل الجروبات المسجلة (خاص المسؤولين فقط)
 GROUPS_LIST_TRIGGERS = {"الجروبات", "كل الجروبات", "جروبات"}
 GROUPS_FILE = _dp("known_groups.json")
 
@@ -240,16 +237,13 @@ def save_images():
         print(f"❌ خطأ في حفظ الصور: {e}")
 
 # ─────────────────────────────────────────────
-#  قوانين المواجهات (الدستور) — مضمّن كامل في الكود، مفيش حاجة لملف خارجي
+#  قوانين المواجهات (الدستور)
 # ─────────────────────────────────────────────
 WAR_CONSTITUTION = """__PLACEHOLDER_CONSTITUTION__"""
 
 war_rules_text: str = WAR_CONSTITUTION
 
 def load_rules():
-    """الدستور دلوقتي مضمّن جوه الكود نفسه (متغير WAR_CONSTITUTION) —
-    مفيش حاجة لملف war_rules.txt خارجي خالص. الدالة دي موجودة بس عشان
-    التوافق مع كود التشغيل، وبتأكد إن الدستور محمّل صح."""
     global war_rules_text
     war_rules_text = WAR_CONSTITUTION
     print(f"✅ الدستور محمّل من جوه الكود ({len(war_rules_text)} حرف)")
@@ -257,6 +251,11 @@ def load_rules():
 _gemini_key_idx = 0
 
 async def _call_gemini(prompt: str) -> str:
+    """
+    بتنادي Gemini API وبتتناوب بين المفاتيح (round-robin)، وبتعيد الدورة كاملة
+    عدة مرات (GEMINI_MAX_ROUNDS) لو كل المفاتيح فشلت بـ 429 (حد الاستخدام) أو
+    503 (السيرفر مشغول مؤقتًا عند جوجل) — مع فاصل زمني متزايد بين كل دورة.
+    """
     global _gemini_key_idx
     keys = [k for k in GEMINI_API_KEYS if k and not k.startswith("ضع_")]
     if not keys:
@@ -264,22 +263,42 @@ async def _call_gemini(prompt: str) -> str:
 
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     last_err = "غير معروف"
+
     async with httpx.AsyncClient(timeout=30) as client:
-        for _ in range(len(keys)):
-            key = keys[_gemini_key_idx % len(keys)]
-            _gemini_key_idx += 1
-            try:
-                resp = await client.post(GEMINI_URL, headers={"x-goog-api-key": key}, json=payload)
-                if resp.status_code == 429:
-                    last_err = "429 (تخطي حد الاستخدام) على هذا المفتاح"
+        for round_num in range(GEMINI_MAX_ROUNDS):
+            for _ in range(len(keys)):
+                key_pos = _gemini_key_idx % len(keys)
+                key = keys[key_pos]
+                _gemini_key_idx += 1
+                try:
+                    resp = await client.post(
+                        GEMINI_URL, headers={"x-goog-api-key": key}, json=payload
+                    )
+                    if resp.status_code == 429:
+                        last_err = f"429 (تخطي حد الاستخدام) على المفتاح رقم {key_pos + 1}"
+                        print(f"⚠️ Gemini {last_err}")
+                        continue
+                    if resp.status_code == 503:
+                        last_err = f"503 (سيرفر Gemini مشغول مؤقتًا) على المفتاح رقم {key_pos + 1}"
+                        print(f"⚠️ Gemini {last_err}")
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {e}"
+                    print(f"⚠️ Gemini خطأ على المفتاح رقم {key_pos + 1}: {last_err}")
                     continue
-                resp.raise_for_status()
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception as e:
-                last_err = str(e)
-                continue
-    raise RuntimeError(f"كل المفاتيح ({len(keys)}) فشلت. آخر خطأ: {last_err}")
+
+            # كل المفاتيح فشلت في الدورة دي. لو لسه فيه دورات، استنى شوية وحاول تاني.
+            if round_num < GEMINI_MAX_ROUNDS - 1:
+                delay = GEMINI_RETRY_BASE_DELAY * (round_num + 1)
+                print(f"⏳ كل المفاتيح فشلت في الدورة {round_num + 1}، استنى {delay} ثانية وحاول تاني...")
+                await asyncio.sleep(delay)
+
+    raise RuntimeError(
+        f"كل المفاتيح ({len(keys)}) فشلت بعد {GEMINI_MAX_ROUNDS} محاولة. آخر خطأ: {last_err}"
+    )
 
 async def ask_ai_judge(objection_text: str, objector: str, w: dict) -> str:
     if httpx is None:
@@ -345,6 +364,111 @@ async def ask_ai_general(question: str, asker: str, w: dict | None) -> str:
     except Exception as e:
         print(f"❌ خطأ في الرد الآلي: {e}")
         return f"⚠️ حصل خطأ أثناء طلب الرد الآلي: {e}"
+
+async def restrict_profane_user(context, chat_id: int, user_id: int) -> bool:
+    """يقيّد المستخدم (يمنعه من الكتابة/الإرسال) بدون طرده. يرجع True لو نجح."""
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id, user_id,
+            ChatPermissions(
+                can_send_messages=False, can_send_audios=False, can_send_documents=False,
+                can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+                can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"❌ خطأ في تقييد المستخدم {user_id} بسبب السب: {e}")
+        return False
+
+async def unrestrict_user(context, chat_id: int, user_id: int) -> bool:
+    """يرفع التقييد عن المستخدم ويرجّعله صلاحيات الكتابة العادية."""
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id, user_id,
+            ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"❌ خطأ في رفع التقييد عن المستخدم {user_id}: {e}")
+        return False
+
+
+
+#  فحص المحتوى المرئي (صور / فيديو / ستيكرز) — إباحي / دموي / أسلحة
+#  بيستخدم Gemini Vision (نفس مفاتيح النص) لتصنيف الصورة مباشرة، من غير
+#  أي قائمة كلمات، لأن التصنيف هنا بصري مش نصي.
+# ─────────────────────────────────────────────
+GEMINI_VISION_MODEL = os.environ.get("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+GEMINI_VISION_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_VISION_MODEL}:generateContent"
+
+async def _call_gemini_vision(image_bytes: bytes, mime_type: str, prompt: str) -> str:
+    """زي _call_gemini لكن بترفق صورة/فريم فيديو كـ base64 مع البرومبت."""
+    global _gemini_key_idx
+    import base64
+    keys = [k for k in GEMINI_API_KEYS if k and not k.startswith("ضع_")]
+    if not keys:
+        raise RuntimeError("مفيش مفاتيح Gemini متظبطة في GEMINI_API_KEYS.")
+
+    b64_data = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64_data}},
+            ]
+        }]
+    }
+    last_err = "غير معروف"
+    async with httpx.AsyncClient(timeout=30) as client:
+        for round_num in range(GEMINI_MAX_ROUNDS):
+            for _ in range(len(keys)):
+                key_pos = _gemini_key_idx % len(keys)
+                key = keys[key_pos]
+                _gemini_key_idx += 1
+                try:
+                    resp = await client.post(
+                        GEMINI_VISION_URL, headers={"x-goog-api-key": key}, json=payload
+                    )
+                    if resp.status_code in (429, 503):
+                        last_err = f"{resp.status_code} على المفتاح رقم {key_pos + 1}"
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {e}"
+                    continue
+            if round_num < GEMINI_MAX_ROUNDS - 1:
+                await asyncio.sleep(GEMINI_RETRY_BASE_DELAY * (round_num + 1))
+    raise RuntimeError(f"كل المفاتيح فشلوا في فحص الصورة. آخر خطأ: {last_err}")
+
+VISION_UNSAFE_PROMPT = (
+    "افحص هذه الصورة وقول لي هل تحتوي على أي من التالي بشكل واضح:\n"
+    "- محتوى إباحي أو جنسي صريح أو شبه عاري\n"
+    "- محتوى دموي أو عنيف بشكل صادم (دماء، إصابات، قتل، تعذيب)\n"
+    "- أسلحة حقيقية (نارية أو بيضاء) بشكل تهديدي أو ترويجي\n\n"
+    "الصور الرياضية العادية، الشعارات، الميمز العادية، أو الأسلحة داخل ألعاب "
+    "فيديو/رسوم كرتونية بشكل غير واقعي لا تعتبر مخالفة.\n"
+    "رد بكلمة واحدة فقط بدون أي شرح: YES لو فيها مخالفة، NO لو سليمة."
+)
+
+async def is_unsafe_media(image_bytes: bytes, mime_type: str) -> bool:
+    """يرجع True لو الصورة/الفريم فيه إباحي/دموي/سلاح."""
+    if httpx is None or not image_bytes:
+        return False
+    try:
+        result = await _call_gemini_vision(image_bytes, mime_type, VISION_UNSAFE_PROMPT)
+        return result.strip().upper().startswith("YES")
+    except Exception as e:
+        print(f"❌ خطأ في فحص المحتوى المرئي: {e}")
+        return False
 
 # ─────────────────────────────────────────────
 #  البيانات
@@ -460,8 +584,7 @@ async def send_groups_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 # ─────────────────────────────────────────────
-#  قفل التحديث — بيتفعل مرة واحدة بس أول ما البوت يشتغل بالكود ده
-#  (شوف MAINTENANCE_FILE: triggered=True معناها الميزة اتفعلت قبل كده ومش هتتفعل تاني)
+#  قفل التحديث
 # ─────────────────────────────────────────────
 maintenance_state: dict = {}
 
@@ -581,7 +704,7 @@ async def task_reopen_maintenance(bot, delay: float):
     save_maintenance()
 
 # ─────────────────────────────────────────────
-#  نظام الإنذارات (منفصل عن نظام المواجهات — بيشتغل بغض النظر عن وجود مواجهة)
+#  نظام الإنذارات
 # ─────────────────────────────────────────────
 WARNINGS_FILE = _dp("warnings.json")
 warnings_data: dict = {}
@@ -784,6 +907,51 @@ async def handle_warning_system(update: Update, context: ContextTypes.DEFAULT_TY
 # ─────────────────────────────────────────────
 #  جلب mention المالك
 # ─────────────────────────────────────────────
+async def ban_blacklisted_members(context, chat_id: int) -> list:
+    """
+    بتدوّر على كل أعضاء الجروب وتطرد فورًا أي حد موجود في BANNED_USERNAMES
+    أو BANNED_USER_IDS. بترجع قائمة بأسماء/آيديهات اللي اتطردوا فعليًا.
+    ملحوظة: get_chat_administrators بس بيرجّع الأدمنز؛ عشان نفحص كل الأعضاء
+    (مش الأدمنز بس) لازم نستخدم get_chat_member لكل آيدي محدد في BANNED_USER_IDS
+    مباشرة، وممكن كمان نتأكد من اليوزرنيمات المعروفة بنفس الطريقة لو حابب.
+    """
+    if not BANNED_USERNAMES and not BANNED_USER_IDS:
+        return []
+
+    banned_now = []
+
+    # 1) لو عندك آيديهات رقمية محددة في القائمة، بنفحصهم مباشرة (أدق وأسرع)
+    for uid in BANNED_USER_IDS:
+        try:
+            member = await context.bot.get_chat_member(chat_id, uid)
+            if member.status in ("left", "kicked"):
+                continue
+            await context.bot.ban_chat_member(chat_id, uid)
+            tag = f"@{member.user.username}" if member.user.username else f"ID:{uid}"
+            banned_now.append(tag)
+            print(f"🚫 اتطرد {tag} من الجروب {chat_id} (موجود في القائمة السوداء).")
+        except Exception:
+            # الشخص أصلاً مش عضو في الجروب ده، أو حصل خطأ آخر — تجاهل بهدوء
+            continue
+
+    # 2) لليوزرنيمات: بما إن تليجرام مش بيديك API لسرد كل الأعضاء (خصوصية)،
+    # بنحاول نجيب كل يوزرنيم كـ chat عالمي ونشوف لو عضو في الجروب ده تحديدًا
+    for uname in BANNED_USERNAMES:
+        uname_clean = uname.lstrip("@")
+        try:
+            user_chat = await context.bot.get_chat(f"@{uname_clean}")
+            member = await context.bot.get_chat_member(chat_id, user_chat.id)
+            if member.status in ("left", "kicked"):
+                continue
+            await context.bot.ban_chat_member(chat_id, user_chat.id)
+            tag = f"@{uname_clean}"
+            banned_now.append(tag)
+            print(f"🚫 اتطرد {tag} من الجروب {chat_id} (موجود في القائمة السوداء).")
+        except Exception:
+            continue
+
+    return banned_now
+
 async def get_owner_mention(context, chat_id: int) -> str:
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
@@ -797,8 +965,41 @@ async def get_owner_mention(context, chat_id: int) -> str:
         pass
     return "مالك الجروب"
 
+async def _flag_and_restrict(update, context, cid, w, user, u_tag, reason: str):
+    """
+    بيقيّد الشخص (منعه من الكتابة) ويبعت رسالة فيها تاك لمالك الجروب تشرح
+    السبب وتنتظر قراره (اطرد / الغاء تقييد كـ رد على الرسالة دي). الحالة
+    بتتخزن في w["pending_moderation"] لحد ما المالك يرد.
+    """
+    ok = await restrict_profane_user(context, cid, user.id)
+    owner_mention = await get_owner_mention(context, cid)
+
+    if ok:
+        status_line = f"🔒 تم تقييد {u_tag} مؤقتًا (منع من الكتابة)."
+    else:
+        status_line = (
+            f"⚠️ رُصدت مخالفة من {u_tag} لكن فشل التقييد "
+            "(تأكد إن البوت أدمن وعنده صلاحية تقييد الأعضاء)."
+        )
+
+    alert_msg = await update.message.reply_text(
+        f"{status_line}\n\n"
+        f"📌 السبب: {reason}\n\n"
+        f"👑 {owner_mention} برجاء الرد على هذه الرسالة بقرارك:\n"
+        f"• اطرد — لطرده نهائيًا\n"
+        f"• الغاء تقييد — لو المخالفة غير مقصودة وتريد رفع التقييد",
+        parse_mode="HTML"
+    )
+    w["pending_moderation"] = {
+        "target_id": user.id,
+        "target_tag": u_tag,
+        "alert_mid": alert_msg.message_id,
+        "reason": reason,
+    }
+    save()
+
 # ─────────────────────────────────────────────
-#  جلب / إنشاء رابط دعوة للجروب (يعمل حتى لو Private)
+#  جلب / إنشاء رابط دعوة للجروب
 # ─────────────────────────────────────────────
 async def get_group_invite_link(context, chat_id: int) -> str | None:
     try:
@@ -874,7 +1075,7 @@ async def send_war_link(context, chat_id: int, reason: str):
         print(f"❌ فشل إرسال الرابط: {e}")
 
 # ─────────────────────────────────────────────
-#  تعديل 1: مهلة تسليم القوائم
+#  مهلة تسليم القوائم
 # ─────────────────────────────────────────────
 async def auto_win_missing_roster(chat_id: int, context, w: dict, win_k: str):
     lose_k = "c2" if win_k == "c1" else "c1"
@@ -956,7 +1157,7 @@ async def task_auto_send_after_6h(chat_id: int, context, delay: float = TIME_AUT
     await send_war_link(context, chat_id, "✅ أُرسل تلقائياً بعد 6 ساعات من انتهاء المواجهة.")
 
 # ─────────────────────────────────────────────
-#  حساب التاكات عن طريق جلسة Telethon (بتقرأ الهستوري القديم)
+#  حساب التاكات عن طريق جلسة Telethon
 # ─────────────────────────────────────────────
 def _extract_mentions(text: str) -> set:
     if not text:
@@ -1317,13 +1518,71 @@ async def cmd_setimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _process_setimage(update, "")
 
 
+async def _moderate_media_before_draw(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, mime_type: str) -> bool:
+    """
+    فحص محتوى مرئي (صورة/فيديو/ستيكر) طول فترة المواجهة بالكامل: من لحظة
+    "Clan VS Clan" وحتى انتهاء المواجهة فعليًا (فوز/فوز إداري)، مش بس لحد
+    القرعة. يرجع True لو تم رصد مخالفة وتقييد الشخص.
+    """
+    cid  = update.effective_chat.id
+    user = update.effective_user
+    if not user:
+        return False
+    w = wars.get(cid)
+    if not w:
+        w = await try_recover_war(cid, context)
+    # مفيش w أصلاً، أو المواجهة خلصت فعليًا (end_ts اتحط)، أو فيه قرار معلّق حاليًا
+    if not w or w.get("end_ts") or w.get("pending_moderation"):
+        return False
+
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        media_bytes = bytes(await tg_file.download_as_bytearray())
+    except Exception as e:
+        print(f"❌ خطأ في تحميل الميديا للفحص: {e}")
+        return False
+
+    if not await is_unsafe_media(media_bytes, mime_type):
+        return False
+
+    u_tag = f"@{user.username}" if user.username else f"ID:{user.id}"
+    await _flag_and_restrict(update, context, cid, w, user, u_tag, "إرسال محتوى مخالف (إباحي/دموي/سلاح)")
+    return True
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
     await lock_group_if_needed(context.bot, update.effective_chat)
+
+    largest = update.message.photo[-1]
+    if await _moderate_media_before_draw(update, context, largest.file_id, "image/jpeg"):
+        return
+
     caption = (update.message.caption or "").strip()
     if re.match(r'^/setimage', caption, re.IGNORECASE):
         await cmd_setimage(update, context)
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.sticker:
+        return
+    await lock_group_if_needed(context.bot, update.effective_chat)
+    sticker = update.message.sticker
+    # الستيكرز المتحركة (.tgs) والفيديو (.webm) بصيغ خاصة بتليجرام، فبنستخدم
+    # الصورة المصغّرة (thumbnail) بتاعتها للفحص لأنها JPEG عادي وممثّلة للمحتوى.
+    thumb = sticker.thumbnail
+    if thumb:
+        await _moderate_media_before_draw(update, context, thumb.file_id, "image/jpeg")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not (update.message.video or update.message.animation):
+        return
+    await lock_group_if_needed(context.bot, update.effective_chat)
+    media = update.message.video or update.message.animation
+    thumb = media.thumbnail
+    if thumb:
+        # بنفحص الصورة المصغّرة (thumbnail) للفيديو بدل الفيديو كامل — أسرع
+        # وأخف بكتير، وكافية لرصد المحتوى الصريح في الغالبية العظمى من الحالات.
+        await _moderate_media_before_draw(update, context, thumb.file_id, "image/jpeg")
 
 # ─────────────────────────────────────────────
 #  /images
@@ -1340,7 +1599,7 @@ async def cmd_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─────────────────────────────────────────────
-#  تعديل 1: إنهاء إعداد المواجهة (بعد اختيار الدور / الساعات)
+#  إنهاء إعداد المواجهة (بعد اختيار الدور / الساعات)
 # ─────────────────────────────────────────────
 async def _finalize_war(update, context, cid, c1, c2, stage, hours, referee, created_ts):
     wars[cid] = {
@@ -1398,7 +1657,7 @@ async def _finalize_war(update, context, cid, c1, c2, stage, hours, referee, cre
     asyncio.create_task(task_check_roster_deadline(cid, context, hours * 3600))
 
 # ─────────────────────────────────────────────
-#  تعديل 3: قائمة المواجهات المفتوحة (خاص المسؤولين)
+#  قائمة المواجهات المفتوحة (خاص المسؤولين)
 # ─────────────────────────────────────────────
 async def handle_private_war_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -1475,8 +1734,6 @@ async def handle_private_war_list(update: Update, context: ContextTypes.DEFAULT_
 
 # ─────────────────────────────────────────────
 #  استرجاع مواجهة ضايعة من الرسالة المثبتة (بدون تيلثون)
-#  بيتفعل تلقائي أول رسالة توصل لأي جروب مسجّلة فيه مواجهة قديمة اختفت من
-#  war_data.json (زي بعد نقل DATA_DIR) لكن لسه الجدول مثبّت في الجروب.
 # ─────────────────────────────────────────────
 _recovery_checked: set = set()
 
@@ -1583,6 +1840,36 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await handle_warning_system(update, context, cid, is_creator):
         return
 
+    # ── رد مالك الجروب على شخص مقيّد بسبب مخالفة (سب / محتوى غير لائق) ──
+    # لازم يكون رد (reply) على رسالة التنبيه، ولازم يكون مالك الجروب هو اللي بيرد.
+    if (
+        is_creator and w and w.get("pending_moderation")
+        and update.message.reply_to_message
+        and update.message.reply_to_message.message_id == w["pending_moderation"].get("alert_mid")
+    ):
+        target_id  = w["pending_moderation"]["target_id"]
+        target_tag = w["pending_moderation"]["target_tag"]
+        if any(k in msg_cl for k in ("اطرد", "طرد", "افصله", "شيله")):
+            try:
+                await context.bot.ban_chat_member(cid, target_id)
+                await update.message.reply_text(f"🚫 تم طرد {target_tag} بقرار مالك الجروب.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ فشل الطرد: {e}")
+            w["pending_moderation"] = None
+            save()
+            return
+        if any(k in msg_cl for k in ("الغاء تقييد", "الغاء التقييد", "سيبه", "فك تقييد", "فك التقييد")):
+            ok = await unrestrict_user(context, cid, target_id)
+            if ok:
+                await update.message.reply_text(f"✅ تم رفع التقييد عن {target_tag}.")
+            else:
+                await update.message.reply_text(f"❌ فشل رفع التقييد عن {target_tag}.")
+            w["pending_moderation"] = None
+            save()
+            return
+        await update.message.reply_text("❓ اكتب: اطرد / الغاء تقييد (كـ رد على رسالة التنبيه).")
+        return
+
     if msg_cl.strip() in LINK_TRIGGERS:
         await cmd_group_link(update, context)
         return
@@ -1680,6 +1967,17 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save()
         await update.message.reply_text(f"⚔️ {c1}  VS  {c2}\n\n" + STAGE_QUESTION)
+
+        # فحص فوري للقائمة السوداء وطرد أي حد موجود منها في الجروب ده
+        try:
+            banned_now = await ban_blacklisted_members(context, cid)
+            if banned_now:
+                await update.message.reply_text(
+                    "🚫 تم طرد الأعضاء التالية أسماؤهم فورًا (موجودين في القائمة السوداء):\n"
+                    + "\n".join(banned_now)
+                )
+        except Exception as e:
+            print(f"❌ خطأ في فحص/طرد القائمة السوداء للجروب {cid}: {e}")
         return
 
     if not w or w.get("waiting_stage"):
@@ -1914,6 +2212,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("link",     cmd_group_link))
     app.add_handler(ChatMemberHandler(track_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION, handle_video))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
         handle_private_war_list
