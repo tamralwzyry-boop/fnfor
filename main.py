@@ -160,6 +160,31 @@ RESPONSIBLE_USERNAMES = {"leeeeeeeeevvi", "z6_i3"}
 BANNED_USER_IDS = BANNED_USER_IDS_MANUAL
 BANNED_USERNAMES: set = set()  # اتشالت لصالح الآيديهات الرقمية (أدق وأضمن)
 
+# ─────────────────────────────────────────────
+#  طرد صامت وفوري لأي حد في القائمة السوداء
+#  (مش بس وقت تفعيل Clan VS Clan — دلوقتي بيتفحص مع كل رسالة/دخول عضو،
+#  في أي وقت، في أي جروب موجود فيه البوت، من غير أي إعلان في الجروب)
+# ─────────────────────────────────────────────
+async def _silent_kick_if_banned(context, chat, user_obj, message_id=None) -> bool:
+    """لو الشخص ده موجود في BANNED_USER_IDS، بيتطرد فورًا وبصمت تام (من غير
+    أي رسالة تعلن الطرد جوه الجروب). بترجع True لو فعلاً اتطرد."""
+    if not user_obj or user_obj.id not in BANNED_USER_IDS:
+        return False
+    if not chat or chat.type not in ("group", "supergroup"):
+        return False
+    try:
+        await context.bot.ban_chat_member(chat.id, user_obj.id)
+    except Exception as e:
+        print(f"❌ فشل الطرد الصامت للآيدي المحظور {user_obj.id} من الجروب {chat.id}: {e}")
+        return False
+    if message_id:
+        try:
+            await context.bot.delete_message(chat.id, message_id)
+        except Exception:
+            pass
+    print(f"🚫 طرد صامت لآيدي محظور ({user_obj.id}) من الجروب {chat.id}.")
+    return True
+
 def is_tag_admin(user, is_creator: bool) -> bool:
     if is_creator:
         return True
@@ -561,6 +586,26 @@ async def track_chat_member_update(update: Update, context: ContextTypes.DEFAULT
     else:
         remember_chat(chat, is_admin=(new_status == "administrator"), removed=False)
 
+async def track_any_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بيرصد أي حد بيدخل أي جروب فيه البوت (عبر تحديثات chat_member العامة)،
+    ولو كان آيدي محظور يتطرد فورًا وبصمت — حتى لو دخل من غير ما يبعت أي رسالة."""
+    cmu = update.chat_member
+    if not cmu:
+        return
+    old_status = cmu.old_chat_member.status
+    new_status = cmu.new_chat_member.status
+    if old_status in ("member", "administrator", "creator") or new_status in ("left", "kicked"):
+        return
+    await _silent_kick_if_banned(context, cmu.chat, cmu.new_chat_member.user)
+
+async def handle_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """طبقة حماية إضافية: رسالة الانضمام الخدمية العادية (لو ظهرت) بتتفحص
+    برضو، عشان نضمن الطرد الفوري حتى لو تحديثات chat_member اتأخرت."""
+    if not update.message or not update.message.new_chat_members:
+        return
+    for member in update.message.new_chat_members:
+        await _silent_kick_if_banned(context, update.effective_chat, member)
+
 async def send_groups_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = {k: v for k, v in known_groups.items() if not v.get("removed")}
     if not active:
@@ -702,6 +747,44 @@ async def task_reopen_maintenance(bot, delay: float):
             print(f"❌ خطأ في فتح الجروب {cid_s} بعد التحديث: {e}")
     maintenance_state["active"] = False
     save_maintenance()
+
+async def open_all_groups_now(bot):
+    """يفتح كل الجروبات فورًا أول ما البوت يشتغل، لو لسه قفل التحديث شغال —
+    ده بيتنفذ في كل مرة البوت يبدأ (مش مرة واحدة بس)، عشان أي جروب اتقفل
+    ومترجعش يتفتح تلقائي (سواء لأن البوت اتقفل قبل ميعاد الفتح المجدول، أو
+    لأي سبب تاني) يترجع يتفتح فورًا بدل ما يفضل مقفول."""
+    if not maintenance_state.get("active"):
+        return
+
+    groups = maintenance_state.get("groups", {})
+    handled_ids = set()
+    for cid_s, saved in list(groups.items()):
+        cid = int(cid_s)
+        try:
+            restored = ChatPermissions(**_safe_permissions_kwargs(saved)) if saved else ChatPermissions(can_send_messages=True)
+            await bot.set_chat_permissions(cid, restored)
+            await bot.send_message(cid, MAINTENANCE_REOPEN_TEXT)
+            print(f"🔓 اتفتح الجروب {cid_s} فورًا عند بدء تشغيل البوت.")
+        except Exception as e:
+            print(f"❌ خطأ في فتح الجروب {cid_s} فور بدء التشغيل: {e}")
+        handled_ids.add(cid_s)
+
+    # أي جروب تاني معروف للبوت (موجود جوه known_groups) وماكانش لسه اتسجل
+    # كـ"مقفول" (يعني ماوصلوش رسالة بعد تفعيل القفل عشان يتقفل بشكل طبيعي)،
+    # نتأكد إنه مفتوح برضو بدل ما يفضل معلّق لحد ما توصله رسالة.
+    for cid_s, info in list(known_groups.items()):
+        if info.get("removed") or cid_s in handled_ids:
+            continue
+        cid = int(cid_s)
+        try:
+            await bot.set_chat_permissions(cid, ChatPermissions(can_send_messages=True))
+        except Exception as e:
+            print(f"⚠️ تعذّر التأكد من فتح الجروب {cid_s}: {e}")
+
+    maintenance_state["active"] = False
+    maintenance_state["groups"] = {}
+    save_maintenance()
+    print("🔓 اتفتحت كل الجروبات فورًا عند بدء تشغيل البوت.")
 
 # ─────────────────────────────────────────────
 #  نظام الإنذارات
@@ -1552,6 +1635,8 @@ async def _moderate_media_before_draw(update: Update, context: ContextTypes.DEFA
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
+    if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
+        return
     await lock_group_if_needed(context.bot, update.effective_chat)
 
     largest = update.message.photo[-1]
@@ -1565,6 +1650,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.sticker:
         return
+    if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
+        return
     await lock_group_if_needed(context.bot, update.effective_chat)
     sticker = update.message.sticker
     # الستيكرز المتحركة (.tgs) والفيديو (.webm) بصيغ خاصة بتليجرام، فبنستخدم
@@ -1575,6 +1662,8 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not (update.message.video or update.message.animation):
+        return
+    if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
         return
     await lock_group_if_needed(context.bot, update.effective_chat)
     media = update.message.video or update.message.animation
@@ -1821,6 +1910,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_cl = clean(msg)
     user   = update.effective_user
     u_tag  = f"@{user.username}" if user.username else f"ID:{user.id}"
+
+    if await _silent_kick_if_banned(context, update.effective_chat, user, update.message.message_id):
+        return
 
     remember_chat(update.effective_chat)
     await lock_group_if_needed(context.bot, update.effective_chat)
@@ -2181,22 +2273,15 @@ async def _end_war(update, context, cid, w, win_k):
 async def post_init(application):
     await restore_tasks(application.bot)
 
-    # ── فتح فوري لمرة واحدة (يخص ترقية الاستضافة لهذه النسخة) ──
-    # لو فيه قفل تحديث شغال حاليًا (active=True) من نسخة سابقة، وده أول تشغيل
-    # لهذه النسخة الجديدة، افتح كل الجروبات فورًا بنفس صلاحياتها المحفوظة
-    # بدل ما تستنى الموعد المجدول (الخميس 11). العلامة one_time_reopen_done
-    # بتتحط بعد أول مرة عشان ده ميتكررش في أي ريستارت مستقبلي — أي قفل جديد
-    # يحصل بعد كده هيفضل ياخد مساره الطبيعي وينتظر الموعد المحدد زي الأصل.
-    if maintenance_state.get("active") and not maintenance_state.get("one_time_reopen_done"):
-        maintenance_state["one_time_reopen_done"] = True
-        save_maintenance()
-        print("🔓 فتح فوري لمرة واحدة (نسخة جديدة) — هيتم فتح كل الجروبات المقفولة الآن بنفس إعداداتها السابقة.")
-        asyncio.create_task(task_reopen_maintenance(application.bot, 0))
+    # ── فتح فوري لكل الجروبات مع كل بدء تشغيل للبوت ──
+    # لو فيه قفل تحديث شغال (active=True)، افتح كل الجروبات فورًا بنفس
+    # صلاحياتها المحفوظة بدل ما تستنى الموعد المجدول (الخميس 11) — وده
+    # بيتنفذ في كل مرة البوت يشتغل فيها (مش مرة واحدة بس)، عشان محدش يفضل
+    # مقفول بالغلط لو حصل ريستارت قبل الموعد المجدول.
+    if maintenance_state.get("active"):
+        asyncio.create_task(open_all_groups_now(application.bot))
     elif not maintenance_state.get("triggered"):
         asyncio.create_task(run_maintenance_lock_once(application.bot))
-    elif maintenance_state.get("active") and maintenance_state.get("reopen_ts"):
-        remaining = max(0.0, float(maintenance_state["reopen_ts"]) - now_ts())
-        asyncio.create_task(task_reopen_maintenance(application.bot, remaining))
 
 # ─────────────────────────────────────────────
 #  تشغيل — Flask + env vars (للسيرفر/الاستضافة)
@@ -2222,6 +2307,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("images",   cmd_images))
     app.add_handler(CommandHandler("link",     cmd_group_link))
     app.add_handler(ChatMemberHandler(track_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(track_any_member_join, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_chat_members))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION, handle_video))
@@ -2234,6 +2321,6 @@ if __name__ == "__main__":
         handle_msg
     ))
 
-    print("✅ البوت يعمل.")
+    print("✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
