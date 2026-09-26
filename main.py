@@ -752,13 +752,23 @@ async def open_all_groups_now(bot):
     """يفتح كل الجروبات فورًا أول ما البوت يشتغل، لو لسه قفل التحديث شغال —
     ده بيتنفذ في كل مرة البوت يبدأ (مش مرة واحدة بس)، عشان أي جروب اتقفل
     ومترجعش يتفتح تلقائي (سواء لأن البوت اتقفل قبل ميعاد الفتح المجدول، أو
-    لأي سبب تاني) يترجع يتفتح فورًا بدل ما يفضل مقفول."""
+    لأي سبب تاني) يترجع يتفتح فورًا بدل ما يفضل مقفول.
+
+    مهم: بنحط active=False فورًا في أول سطر (قبل أي نداء API بياخد وقت)،
+    عشان نقفل أي احتمال إن رسالة توصل جوه ثانية-اتنين من رسايل البدء وتلاقي
+    قفل التحديث لسه شغال فتتقفل من جديد (سباق/race condition). أي جروب لسه
+    ما اتفتحش فعليًا هيتفتح في الخلفية بعد كده بنفس صلاحياته المحفوظة.
+    """
     if not maintenance_state.get("active"):
         return
 
-    groups = maintenance_state.get("groups", {})
+    groups_snapshot = dict(maintenance_state.get("groups", {}))
+    maintenance_state["active"] = False
+    maintenance_state["groups"] = {}
+    save_maintenance()
+
     handled_ids = set()
-    for cid_s, saved in list(groups.items()):
+    for cid_s, saved in groups_snapshot.items():
         cid = int(cid_s)
         try:
             restored = ChatPermissions(**_safe_permissions_kwargs(saved)) if saved else ChatPermissions(can_send_messages=True)
@@ -781,9 +791,6 @@ async def open_all_groups_now(bot):
         except Exception as e:
             print(f"⚠️ تعذّر التأكد من فتح الجروب {cid_s}: {e}")
 
-    maintenance_state["active"] = False
-    maintenance_state["groups"] = {}
-    save_maintenance()
     print("🔓 اتفتحت كل الجروبات فورًا عند بدء تشغيل البوت.")
 
 # ─────────────────────────────────────────────
@@ -2321,6 +2328,6 @@ if __name__ == "__main__":
         handle_msg
     ))
 
-    print("✅ البوت يعمل...")
+    print("✅ البوت يعمل...نوقطه. ")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
