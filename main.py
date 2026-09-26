@@ -692,6 +692,42 @@ _CP_VALID_KEYS = set(inspect.signature(ChatPermissions.__init__).parameters.keys
 def _safe_permissions_kwargs(d: dict) -> dict:
     return {k: v for k, v in (d or {}).items() if k in _CP_VALID_KEYS}
 
+def _full_open_permissions() -> ChatPermissions:
+    """صلاحيات مفتوحة بالكامل — نفس المعيار اللي بيتفتح بيه أي جروب/مواجهة
+    تانية، عشان أي جروب يتفتح بيها يبقى متسق مع باقي الجروبات."""
+    return ChatPermissions(**_safe_permissions_kwargs({
+        "can_send_messages": True, "can_send_audios": True, "can_send_documents": True,
+        "can_send_photos": True, "can_send_videos": True, "can_send_video_notes": True,
+        "can_send_voice_notes": True, "can_send_polls": True, "can_send_other_messages": True,
+        "can_add_web_page_previews": True, "can_change_info": True,
+        "can_invite_users": True, "can_pin_messages": True,
+    }))
+
+_unlock_checking_in_progress: set = set()
+
+async def unlock_group_if_locked(bot, chat):
+    """بتتفحص مع كل رسالة، في أي جروب (سواء البوت عارفه من قبل أو لأ):
+    بتقرا صلاحيات الجروب الفعلية من تليجرام مباشرة، ولو لاقت الجروب مقفول
+    (can_send_messages=False) بتفتحه فورًا بنفس الإعدادات المفتوحة للمواجهات
+    التانية. لو الجروب أصلاً مفتوح، ميعملش أي حاجة وميلمسش صلاحياته خالص."""
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    cid_s = str(chat.id)
+    if cid_s in _unlock_checking_in_progress:
+        return
+    _unlock_checking_in_progress.add(cid_s)
+    try:
+        full_chat = await bot.get_chat(chat.id)
+        perms = full_chat.permissions
+        if perms is not None and perms.can_send_messages:
+            return  # مفتوح أصلاً — نسيبه ومنلمسش حاجة
+        await bot.set_chat_permissions(chat.id, _full_open_permissions())
+        print(f"🔓 الجروب {chat.id} كان مقفول ووصلته رسالة، فاتفتح فورًا.")
+    except Exception as e:
+        print(f"⚠️ تعذّر التأكد من/فتح صلاحيات الجروب {chat.id}: {e}")
+    finally:
+        _unlock_checking_in_progress.discard(cid_s)
+
 _locking_in_progress: set = set()
 
 async def lock_group_if_needed(bot, chat):
@@ -749,23 +785,17 @@ async def task_reopen_maintenance(bot, delay: float):
     save_maintenance()
 
 async def open_all_groups_now(bot):
-    """يفتح كل الجروبات فورًا أول ما البوت يشتغل، لو لسه قفل التحديث شغال —
-    ده بيتنفذ في كل مرة البوت يبدأ (مش مرة واحدة بس)، عشان أي جروب اتقفل
-    ومترجعش يتفتح تلقائي (سواء لأن البوت اتقفل قبل ميعاد الفتح المجدول، أو
-    لأي سبب تاني) يترجع يتفتح فورًا بدل ما يفضل مقفول.
-
-    مهم: بنحط active=False فورًا في أول سطر (قبل أي نداء API بياخد وقت)،
-    عشان نقفل أي احتمال إن رسالة توصل جوه ثانية-اتنين من رسايل البدء وتلاقي
-    قفل التحديث لسه شغال فتتقفل من جديد (سباق/race condition). أي جروب لسه
-    ما اتفتحش فعليًا هيتفتح في الخلفية بعد كده بنفس صلاحياته المحفوظة.
+    """يفتح كل الجروبات فورًا مع كل تشغيل للبوت — من غير ما تعتمد على إن
+    maintenance_lock.json محفوظ فعليًا. لو الاستضافة (زي Railway من غير
+    Volume دائم) بتصفّر الملف ده مع كل ريستارت، البوت برضو هيفضل يفتح كل
+    جروب معروف ليه بصلاحيات كاملة تلقائيًا — عشان محدش يفضل مقفول للأبد
+    من غير ما يكون له طريقة يترجع بيها لوحده.
     """
-    if not maintenance_state.get("active"):
-        return
-
     groups_snapshot = dict(maintenance_state.get("groups", {}))
-    maintenance_state["active"] = False
-    maintenance_state["groups"] = {}
-    save_maintenance()
+    if maintenance_state.get("active"):
+        maintenance_state["active"] = False
+        maintenance_state["groups"] = {}
+        save_maintenance()
 
     handled_ids = set()
     for cid_s, saved in groups_snapshot.items():
@@ -779,15 +809,14 @@ async def open_all_groups_now(bot):
             print(f"❌ خطأ في فتح الجروب {cid_s} فور بدء التشغيل: {e}")
         handled_ids.add(cid_s)
 
-    # أي جروب تاني معروف للبوت (موجود جوه known_groups) وماكانش لسه اتسجل
-    # كـ"مقفول" (يعني ماوصلوش رسالة بعد تفعيل القفل عشان يتقفل بشكل طبيعي)،
-    # نتأكد إنه مفتوح برضو بدل ما يفضل معلّق لحد ما توصله رسالة.
+    # أي جروب تاني معروف للبوت (موجود جوه known_groups) نتأكد إنه مفتوح
+    # برضو، بغض النظر عن حالة ملف قفل التحديث — طبقة حماية إضافية.
     for cid_s, info in list(known_groups.items()):
         if info.get("removed") or cid_s in handled_ids:
             continue
         cid = int(cid_s)
         try:
-            await bot.set_chat_permissions(cid, ChatPermissions(can_send_messages=True))
+            await bot.set_chat_permissions(cid, _full_open_permissions())
         except Exception as e:
             print(f"⚠️ تعذّر التأكد من فتح الجروب {cid_s}: {e}")
 
@@ -1645,6 +1674,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
         return
     await lock_group_if_needed(context.bot, update.effective_chat)
+    await unlock_group_if_locked(context.bot, update.effective_chat)
 
     largest = update.message.photo[-1]
     if await _moderate_media_before_draw(update, context, largest.file_id, "image/jpeg"):
@@ -1660,6 +1690,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
         return
     await lock_group_if_needed(context.bot, update.effective_chat)
+    await unlock_group_if_locked(context.bot, update.effective_chat)
     sticker = update.message.sticker
     # الستيكرز المتحركة (.tgs) والفيديو (.webm) بصيغ خاصة بتليجرام، فبنستخدم
     # الصورة المصغّرة (thumbnail) بتاعتها للفحص لأنها JPEG عادي وممثّلة للمحتوى.
@@ -1673,6 +1704,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _silent_kick_if_banned(context, update.effective_chat, update.effective_user, update.message.message_id):
         return
     await lock_group_if_needed(context.bot, update.effective_chat)
+    await unlock_group_if_locked(context.bot, update.effective_chat)
     media = update.message.video or update.message.animation
     thumb = media.thumbnail
     if thumb:
@@ -1923,6 +1955,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     remember_chat(update.effective_chat)
     await lock_group_if_needed(context.bot, update.effective_chat)
+    await unlock_group_if_locked(context.bot, update.effective_chat)
 
     try:
         cm         = await context.bot.get_chat_member(cid, user.id)
@@ -2280,15 +2313,14 @@ async def _end_war(update, context, cid, w, win_k):
 async def post_init(application):
     await restore_tasks(application.bot)
 
-    # ── فتح فوري لكل الجروبات مع كل بدء تشغيل للبوت ──
-    # لو فيه قفل تحديث شغال (active=True)، افتح كل الجروبات فورًا بنفس
-    # صلاحياتها المحفوظة بدل ما تستنى الموعد المجدول (الخميس 11) — وده
-    # بيتنفذ في كل مرة البوت يشتغل فيها (مش مرة واحدة بس)، عشان محدش يفضل
-    # مقفول بالغلط لو حصل ريستارت قبل الموعد المجدول.
-    if maintenance_state.get("active"):
-        asyncio.create_task(open_all_groups_now(application.bot))
-    elif not maintenance_state.get("triggered"):
-        asyncio.create_task(run_maintenance_lock_once(application.bot))
+    # ── فتح كل الجروبات مع كل تشغيل للبوت (مش مشروط بحالة ملف القفل) ──
+    # كان بيحصل إن أي إعادة تشغيل للبوت (ريستارت على Railway) بيلاقي
+    # maintenance_lock.json فاضي (لو مفيش Volume دائم متوصّل)، فيعتبر إنها
+    # أول مرة (triggered=False) ويبدأ دورة قفل جديدة من الصفر تلقائيًا —
+    # وده اللي كان بيقفل كل الجروبات من غير أي سبب حقيقي. اتشال التفعيل
+    # التلقائي ده نهائيًا، وبقى فيه بس فتح فوري لكل جروب معروف مع كل
+    # تشغيل، بغض النظر عن حالة الملف، عشان محدش يفضل مقفول للأبد.
+    asyncio.create_task(open_all_groups_now(application.bot))
 
 # ─────────────────────────────────────────────
 #  تشغيل — Flask + env vars (للسيرفر/الاستضافة)
@@ -2328,6 +2360,6 @@ if __name__ == "__main__":
         handle_msg
     ))
 
-    print("✅ البوت يعمل...نوقطه. ")
+    print("نوقطهكبيره✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
