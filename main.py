@@ -2358,6 +2358,6 @@ if __name__ == "__main__":
         handle_msg
     ))
 
-    print("نوقطهكبيره✅ البوت يعمل...")
+    print("✅ البوت يعمل...")
     print(f"📤 الرابط سيُرسل إلى: {RESULTS_DESTINATION}")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
